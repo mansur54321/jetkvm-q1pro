@@ -337,10 +337,10 @@ func (g *gatt) serve(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-g.conn.Context().Done():
-			return errors.New("Bluetooth bus closed")
+			return errors.New("connection to Bluetooth bus closed")
 		case sig, ok := <-sigs:
 			if !ok {
-				return errors.New("Bluetooth signals closed")
+				return errors.New("channel for Bluetooth signals closed")
 			}
 			g.connection(sig)
 		case <-g.s.updates:
@@ -386,7 +386,7 @@ func findAdapter(ctx context.Context, conn *dbus.Conn) (dbus.ObjectPath, error) 
 		}
 	}
 	if found == "" {
-		return "", errors.New("Bluetooth controller unavailable")
+		return "", errors.New("no Bluetooth controller available")
 	}
 	return found, nil
 }
@@ -413,7 +413,7 @@ func runPeripheral(ctx context.Context, s *session) error {
 	for radio.Err() == nil {
 		select {
 		case <-done:
-			return errors.New("Bluetooth stack unavailable")
+			return errors.New("no Bluetooth stack available")
 		case <-time.After(300 * time.Millisecond):
 		case <-radio.Done():
 			return radio.Err()

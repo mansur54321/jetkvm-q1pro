@@ -1,8 +1,9 @@
 package nmlite
 
 import (
-	"github.com/jetkvm/kvm/internal/network/types"
 	"net"
+
+	"github.com/jetkvm/kvm/internal/network/types"
 )
 
 func (nm *NetworkManager) IsOnline() bool {

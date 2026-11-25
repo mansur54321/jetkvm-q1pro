@@ -151,7 +151,7 @@ func reportMemory() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Q1 guest memory CPUs=%d MemTotal_KiB=%d MemAvailable_KiB=%d\n", runtime.NumCPU(), total, available)
+	fmt.Fprintf(os.Stdout, "Q1 guest memory CPUs=%d MemTotal_KiB=%d MemAvailable_KiB=%d\n", runtime.NumCPU(), total, available)
 	pids, err := filepath.Glob("/proc/[0-9]*/status")
 	if err != nil {
 		return err
@@ -190,7 +190,7 @@ func reportMemory() error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Q1 process %s VmRSS_KiB=%d VmHWM_KiB=%d\n", role, rss, peak)
+		fmt.Fprintf(os.Stdout, "Q1 process %s VmRSS_KiB=%d VmHWM_KiB=%d\n", role, rss, peak)
 		found[role] = true
 	}
 	if len(found) != 3 {
@@ -233,7 +233,7 @@ func verifyRPC(ctx context.Context, rpc *webrtc.DataChannel, replies <-chan rpcR
 	if video.Ready == nil || *video.Ready || video.Error != "device_unavailable" || video.Width != 0 || video.Height != 0 {
 		return fmt.Errorf("unexpected video state: %+v", video)
 	}
-	fmt.Println("Q1 WebRTC verified getVideoState ready=false error=device_unavailable width=0 height=0")
+	fmt.Fprintln(os.Stdout, "Q1 WebRTC verified getVideoState ready=false error=device_unavailable width=0 height=0")
 	raw, err := call(40, "getDeviceCapabilities", map[string]any{})
 	if err != nil {
 		return err
@@ -245,7 +245,7 @@ func verifyRPC(ctx context.Context, rpc *webrtc.DataChannel, replies <-chan rpcR
 	if !slices.Contains(capabilities, "fixed_edid") || slices.Contains(capabilities, "custom_edid") {
 		return fmt.Errorf("unexpected Q1 EDID capabilities: %v", capabilities)
 	}
-	fmt.Println("Q1 WebRTC verified fixed_edid and no custom_edid")
+	fmt.Fprintln(os.Stdout, "Q1 WebRTC verified fixed_edid and no custom_edid")
 	if !slices.Contains(capabilities, "storage_download") || !slices.Contains(capabilities, "storage_download_only") {
 		return fmt.Errorf("unexpected storage capabilities without NBD: %v", capabilities)
 	}
@@ -260,7 +260,7 @@ func verifyRPC(ctx context.Context, rpc *webrtc.DataChannel, replies <-chan rpcR
 	if space.BytesFree <= 0 || space.BytesFree > 64*1024*1024 {
 		return fmt.Errorf("invalid free space on 64 MiB guest disk: %d", space.BytesFree)
 	}
-	fmt.Printf("Q1 storage download-only free_bytes=%d\n", space.BytesFree)
+	fmt.Fprintf(os.Stdout, "Q1 storage download-only free_bytes=%d\n", space.BytesFree)
 	dial := func() (net.Conn, error) { return net.DialTimeout("tcp4", "127.0.0.1:22", time.Second) }
 	conn, err := dial()
 	if err == nil {
@@ -370,7 +370,7 @@ func test(ctx context.Context, password string) error {
 	case err := <-result:
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("WebRTC %s: %w", pc.ConnectionState(), ctx.Err())
+		return fmt.Errorf("wait for WebRTC in state %s: %w", pc.ConnectionState(), ctx.Err())
 	}
 }
 
@@ -385,5 +385,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Q1 WebRTC failure:", err)
 		os.Exit(1)
 	}
-	fmt.Println("Q1 verified developer SSH closed, Dropbear SSH-2.0 banner when enabled, closed after disable")
+	fmt.Fprintln(os.Stdout, "Q1 verified developer SSH closed, Dropbear SSH-2.0 banner when enabled, closed after disable")
 }

@@ -200,7 +200,7 @@ func verifyBundle(packagePath, keyPath string) (*verifiedBundle, error) {
 		return nil, err
 	}
 	if !ed25519.Verify(key, metadata, signature) {
-		return nil, errors.New("Ed25519 signature on update.json did not verify")
+		return nil, errors.New("update.json Ed25519 signature did not verify")
 	}
 	m, err := parseBundleManifest(metadata)
 	if err != nil {

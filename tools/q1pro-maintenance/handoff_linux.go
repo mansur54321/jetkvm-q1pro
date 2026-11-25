@@ -327,7 +327,7 @@ func prepareHandoff(t *volumeTarget, update, previous, key string) (err error) {
 	if err = marker(handoffDir+"/plan.json", record, 0400); err != nil {
 		return err
 	}
-	fmt.Printf("PREPARED: original system still running; software %s -> %s\n", plan.Current, plan.Next)
+	fmt.Fprintf(os.Stdout, "PREPARED: original system still running; software %s -> %s\n", plan.Current, plan.Next)
 	return nil
 }
 
@@ -410,7 +410,7 @@ func pivotHandoff() error {
 	if c > 2 {
 		unix.Close(c)
 	}
-	fmt.Println("Q1 handoff: BusyBox restarted PID 1 from RAM")
+	fmt.Fprintln(os.Stdout, "Q1 handoff: BusyBox restarted PID 1 from RAM")
 	if e = unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); e != nil {
 		return e
 	}
@@ -444,7 +444,7 @@ func pivotHandoff() error {
 	if bytes.Contains(mounts, []byte(" - ubifs ")) {
 		return errors.New("a UBIFS mount is still active")
 	}
-	fmt.Println("Q1 handoff: old ubiblock root and UBIFS cleanly unmounted")
+	fmt.Fprintln(os.Stdout, "Q1 handoff: old ubiblock root and UBIFS cleanly unmounted")
 	return checkRAMRoot()
 }
 
@@ -575,7 +575,7 @@ func (m handoffMachine) installFromRAM(plan handoffPlan, wd *handoffWatchdog) er
 		return fmt.Errorf("watchdog before UBI update: %w", e)
 	}
 	if e = m.forwardWrite(t, next); e == nil {
-		fmt.Printf("Q1_HANDOFF_SIGNED_UPDATE_PASS software %x\n", next.digest)
+		fmt.Fprintf(os.Stdout, "Q1_HANDOFF_SIGNED_UPDATE_PASS software %x\n", next.digest)
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "Q1 handoff: update failed (%v), checking signed previous software\n", e)
@@ -585,6 +585,6 @@ func (m handoffMachine) installFromRAM(plan handoffPlan, wd *handoffWatchdog) er
 			time.Sleep(time.Hour)
 		}
 	}
-	fmt.Printf("Q1_HANDOFF_PREVIOUS_SOFTWARE_RESTORED %x\n", old.digest)
+	fmt.Fprintf(os.Stdout, "Q1_HANDOFF_PREVIOUS_SOFTWARE_RESTORED %x\n", old.digest)
 	return fmt.Errorf("update failed, signed previous software restored: %w", e)
 }

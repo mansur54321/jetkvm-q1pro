@@ -78,7 +78,7 @@ func acquireHandoffWatchdog(identity string) (*handoffWatchdog, error) {
 		return nil, err
 	}
 	period := min(time.Second, time.Duration(timeout)*time.Second/4)
-	fmt.Printf("Q1 handoff: %s, actual timeout %ds; keepalive every %s\n", identity, timeout, period)
+	fmt.Fprintf(os.Stdout, "Q1 handoff: %s, actual timeout %ds; keepalive every %s\n", identity, timeout, period)
 	go func() {
 		defer close(w.closed)
 		tick := time.NewTicker(period)
@@ -119,6 +119,6 @@ func (w *handoffWatchdog) finish() error {
 	<-w.closed
 	_, err := w.file.Write([]byte("V"))
 	closeErr := w.file.Close()
-	fmt.Printf("Q1 handoff: %d watchdog keepalives before final magic close\n", w.pings)
+	fmt.Fprintf(os.Stdout, "Q1 handoff: %d watchdog keepalives before final magic close\n", w.pings)
 	return errors.Join(err, closeErr)
 }

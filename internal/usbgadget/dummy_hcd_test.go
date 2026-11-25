@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/jetkvm/kvm/internal/imagedownload"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jetkvm/kvm/internal/imagedownload"
 
 	"github.com/rs/zerolog"
 	"golang.org/x/sys/unix"

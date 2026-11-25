@@ -38,7 +38,7 @@ func memory() {
 		name, _ := os.Readlink(path)
 		if filepath.Base(name) == "tailscaled" {
 			status := filepath.Join(filepath.Dir(path), "status")
-			fmt.Printf("Q1 tailnet test: tailscaled RSS=%s KiB HWM=%s KiB; guest MemTotal=%s KiB MemAvailable=%s KiB\n",
+			fmt.Fprintf(os.Stdout, "Q1 tailnet test: tailscaled RSS=%s KiB HWM=%s KiB; guest MemTotal=%s KiB MemAvailable=%s KiB\n",
 				fields(status, "VmRSS"), fields(status, "VmHWM"), fields("/proc/meminfo", "MemTotal"), fields("/proc/meminfo", "MemAvailable"))
 			return
 		}

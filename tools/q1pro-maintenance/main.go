@@ -120,7 +120,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Q1 RAM root and UBI layout verified; software volume capacity %d bytes\n", target.capacity)
+		fmt.Fprintf(os.Stdout, "Q1 RAM root and UBI layout verified; software volume capacity %d bytes\n", target.capacity)
 		return nil
 	}
 	if len(args) == 2 && args[0] == "backup" {
@@ -135,7 +135,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Software volume backup SHA-256 %x\n", digest)
+		fmt.Fprintf(os.Stdout, "Software volume backup SHA-256 %x\n", digest)
 		return nil
 	}
 	if len(args) != 3 || (args[0] != "verify" && args[0] != "install") {
@@ -146,7 +146,7 @@ func run(args []string) error {
 		return err
 	}
 	if args[0] == "verify" {
-		fmt.Printf("Verified %s (%d bytes), SHA-256 %x\n", bundle.app, len(bundle.image), bundle.digest)
+		fmt.Fprintf(os.Stdout, "Verified %s (%d bytes), SHA-256 %x\n", bundle.app, len(bundle.image), bundle.digest)
 		return nil
 	}
 	target, err := installTarget()
@@ -156,7 +156,7 @@ func run(args []string) error {
 	if err := target.install(bundle); err != nil {
 		return err
 	}
-	fmt.Printf("Verified %d payload bytes in UBI volume 0, SHA-256 %x\n", len(bundle.image), bundle.digest)
+	fmt.Fprintf(os.Stdout, "Verified %d payload bytes in UBI volume 0, SHA-256 %x\n", len(bundle.image), bundle.digest)
 	return nil
 }
 

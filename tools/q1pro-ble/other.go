@@ -9,5 +9,5 @@ import (
 
 func (*Controller) Run(context.Context) {}
 func runPeripheral(context.Context, *session) error {
-	return errors.New("Bluetooth provisioning requires Linux")
+	return errors.New("provisioning over Bluetooth requires Linux")
 }
