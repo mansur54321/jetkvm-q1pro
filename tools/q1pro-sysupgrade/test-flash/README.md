@@ -11,7 +11,8 @@ python3 -B tools/q1pro-sysupgrade/test-flash/run.py \
   --kernel-build /path/to/qemu/bsp-build \
   --stock-squashfs /path/to/stock-rootfs.squashfs \
   --rollback /path/to/factory-from-backup-linux-fullboot-sysupgrade.bin \
-  --stock-boot /path/to/backup/mtd3-boot.bin --log /tmp/q1-virtual-flash.log
+  --stock-boot /path/to/backup/mtd3-boot.bin \
+  --stock-boot-sha256 "$BOOT_SHA256" --log /tmp/q1-virtual-flash.log
 ~~~
 
 The tester keeps disk images and serial logs under a new directory when you pass `--work`. Its MTD differs from SPI NAND in page size and bad-block behavior. Physical boot, ECC, OOB and recovery require a board.

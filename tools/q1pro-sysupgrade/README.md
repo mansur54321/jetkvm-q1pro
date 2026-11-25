@@ -6,11 +6,11 @@ Build the installer locally from your own factory boot and software backups. It 
 
 ## Build and validate
 
-`FACTORY_SQUASHFS` points to the locally normalized stock software volume. The builder uses the factory `fwtool` in ARM user-mode QEMU to append and read back the archive metadata.
+`FACTORY_SQUASHFS` points to the locally normalized stock software volume. `BOOT_SHA256` is the digest recorded after comparing independent reads of the original boot partition. The builder uses the factory `fwtool` in ARM user-mode QEMU to append and read back the archive metadata.
 
 ~~~sh
 python3 -B tools/q1pro-sysupgrade/build.py \
-  --release bin/q1pro-image --boot /path/to/backup/mtd3-boot.bin \
+  --release bin/q1pro-image --boot /path/to/backup/mtd3-boot.bin --boot-sha256 "$BOOT_SHA256" \
   --factory-rootfs "$FACTORY_SQUASHFS" --out bin/q1pro-sysupgrade
 python3 -B tools/q1pro-sysupgrade/test.py \
   bin/q1pro-sysupgrade/jetkvm-q1pro-0.1.0-q1pro.4-linux-fullboot-sysupgrade.bin
@@ -23,7 +23,7 @@ The validator exercises the stock Linux format and model checks in an ARM guest.
 ~~~sh
 python3 -B tools/q1pro-sysupgrade/build.py \
   --stock-mtd6 /path/to/backup/mtd6-rootfs.bin --boot /path/to/backup/mtd3-boot.bin \
-  --factory-rootfs "$FACTORY_SQUASHFS"
+  --boot-sha256 "$BOOT_SHA256" --factory-rootfs "$FACTORY_SQUASHFS"
 ~~~
 
 Keep the rollback package with your private backup. The package holds the original software volume and full boot partition. Restore user data separately. A FIT-only package is unsuitable because the stock write can erase the rest of the boot partition.

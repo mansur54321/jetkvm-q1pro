@@ -16,11 +16,12 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 CACHE = Path.home() / ".cache/jetkvm-q1pro"
 sys.path.insert(0, str(REPO / "tools/q1pro-image"))
+sys.path.insert(0, str(HERE.parent))
+from build import boot_partition  # noqa: E402
 from stock import LEB, VOLUME_SIZE, STOCK_SQUASH_SHA256, convert  # noqa: E402
 
 BOOT_SIZE = 4 << 20
 ROOT_SIZE = 83 << 20
-FACTORY_BOOT_SHA = "c2eaaffb4955dac7b7e5dde61fa3e9cd5a13c7ca001ee57ab1ac53a044ebbba7"
 
 
 def digest(data):
@@ -34,16 +35,10 @@ def run(*args, **kwargs):
 def make_images(work, args):
     fixtures = work / "fixtures"
     fixtures.mkdir()
-    boot = args.stock_boot.read_bytes()
+    boot, _, _ = boot_partition(args.stock_boot, work, args.stock_boot_sha256)
     stock = args.stock_squashfs.read_bytes()
-    if (
-        len(boot) != BOOT_SIZE
-        or digest(boot) != FACTORY_BOOT_SHA
-        or digest(stock) != STOCK_SQUASH_SHA256
-    ):
-        raise ValueError(
-            "expected the original Q1 1.0.0_87160a boot partition and normalized factory SquashFS"
-        )
+    if digest(stock) != STOCK_SQUASH_SHA256:
+        raise ValueError("expected the normalized factory 1.0.0_87160a SquashFS")
     # Round up the read-only virtio volume for the final kernel page read.
     (work / "tools.squashfs").write_bytes(stock.ljust(VOLUME_SIZE, b"\0"))
     # A canary proves the writer really changed the first erase block of the virtual boot partition.
@@ -253,6 +248,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     for flag in ["r3", "rollback", "stock-boot"]:
         p.add_argument("--" + flag, type=Path, required=True)
+    p.add_argument("--stock-boot-sha256", required=True,
+                   help="SHA-256 recorded when comparing independent reads of the original boot partition")
     p.add_argument(
         "--r3-sfoo", type=Path, default=REPO / "bin/q1pro-image-r3/q1pro-rootfs.sfoo"
     )
