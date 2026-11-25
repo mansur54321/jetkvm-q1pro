@@ -88,7 +88,7 @@ func (s *grpcServer) broadcastEvent(event *pb.Event) {
 }
 
 func (s *grpcServer) IsReady(ctx context.Context, req *pb.IsReadyRequest) (*pb.IsReadyResponse, error) {
-	return &pb.IsReadyResponse{Ready: true, VideoReady: true}, nil
+	return &pb.IsReadyResponse{Ready: true, VideoReady: s.native.videoInitialized()}, nil
 }
 
 // StreamEvents streams events from the native process

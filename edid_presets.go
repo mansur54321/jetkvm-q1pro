@@ -19,5 +19,8 @@ var edidPresets = []EDIDPreset{
 }
 
 func rpcGetEDIDPresets() ([]EDIDPreset, error) {
+	if isQ1Pro() {
+		return []EDIDPreset{}, nil
+	}
 	return edidPresets, nil
 }

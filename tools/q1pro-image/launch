@@ -1,0 +1,9 @@
+#!/bin/sh
+# A failed boot preparation never starts the app on a read-only or transient state directory.
+if [ ! -f /run/jetkvm-ready ]; then
+    echo 'JetKVM startup incomplete. Check the boot console.' >/dev/console
+    sleep 30
+    exit 1
+fi
+export JETKVM_HEADLESS=1
+exec /usr/bin/jetkvm_app

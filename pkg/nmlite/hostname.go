@@ -24,8 +24,10 @@ func (hm *ResolvConfManager) SetHostname(hostname, domain string) error {
 		return fmt.Errorf("invalid hostname: %s", hostname)
 	}
 
+	hm.mu.Lock()
 	hm.hostname = hostname
 	hm.domain = domain
+	hm.mu.Unlock()
 
 	return hm.reconcileHostname()
 }
@@ -88,12 +90,12 @@ func (hm *ResolvConfManager) getDomain() string {
 
 func (hm *ResolvConfManager) reconcileHostname() error {
 	hm.mu.Lock()
+	defer hm.mu.Unlock()
 	domain := hm.getDomain()
 	hostname := hm.hostname
 	if hostname == "" {
 		hostname = "jetkvm"
 	}
-	hm.mu.Unlock()
 
 	fqdn := hostname
 	if fqdn != "" {

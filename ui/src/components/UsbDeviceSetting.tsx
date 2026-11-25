@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { JsonRpcResponse, useJsonRpc } from "@hooks/useJsonRpc";
 import { useCapability, useUiStore } from "@hooks/stores";
@@ -38,39 +38,38 @@ const defaultUsbDeviceConfig: UsbDeviceConfig = {
   audio: true,
 };
 
-const usbPresets = [
-  {
-    label: m.usb_device_keyboard_mouse_mass_storage_and_audio(),
-    value: "default",
-    config: {
-      keyboard: true,
-      absolute_mouse: true,
-      relative_mouse: true,
-      mass_storage: true,
-      serial_console: false,
-      audio: true,
+function getUsbPresets(displayPortAudio: boolean) {
+  return [
+    {
+      label: displayPortAudio
+        ? m.usb_device_keyboard_mouse_mass_storage()
+        : m.usb_device_keyboard_mouse_mass_storage_and_audio(),
+      value: "default",
+      config: { ...defaultUsbDeviceConfig, audio: !displayPortAudio },
     },
-  },
-  {
-    label: m.usb_device_keyboard_only(),
-    value: "keyboard_only",
-    config: {
-      keyboard: true,
-      absolute_mouse: false,
-      relative_mouse: false,
-      mass_storage: false,
-      serial_console: false,
-      audio: false,
+    {
+      label: m.usb_device_keyboard_only(),
+      value: "keyboard_only",
+      config: {
+        keyboard: true,
+        absolute_mouse: false,
+        relative_mouse: false,
+        mass_storage: false,
+        serial_console: false,
+        audio: false,
+      },
     },
-  },
-  {
-    label: m.usb_device_custom(),
-    value: "custom",
-  },
-];
+    {
+      label: m.usb_device_custom(),
+      value: "custom",
+    },
+  ];
+}
 
 export function UsbDeviceSetting() {
   const usbSerial = useCapability("usb_serial");
+  const displayPortAudio = useCapability("displayport_audio");
+  const usbPresets = useMemo(() => getUsbPresets(displayPortAudio), [displayPortAudio]);
   const { send } = useJsonRpc();
   const [loading, setLoading] = useState(false);
   const { setUsbSerialConsoleEnabled } = useUiStore();
@@ -108,7 +107,7 @@ export function UsbDeviceSetting() {
         setSelectedPreset(matchingPreset ? matchingPreset.value : "custom");
       }
     });
-  }, [send, setUsbSerialConsoleEnabled]);
+  }, [send, setUsbSerialConsoleEnabled, usbPresets]);
 
   const handleUsbConfigChange = useCallback(
     (devices: UsbDeviceConfig) => {
@@ -155,7 +154,7 @@ export function UsbDeviceSetting() {
         }
       }
     },
-    [handleUsbConfigChange],
+    [handleUsbConfigChange, usbPresets],
   );
 
   useEffect(() => {
@@ -234,17 +233,19 @@ export function UsbDeviceSetting() {
                 />
               </SettingsItem>
             </div>
-            <div className="space-y-4">
-              <SettingsItem
-                title={m.usb_device_enable_audio_title()}
-                description={m.usb_device_enable_audio_description()}
-              >
-                <Checkbox
-                  checked={usbDeviceConfig.audio}
-                  onChange={onUsbConfigItemChange("audio")}
-                />
-              </SettingsItem>
-            </div>
+            {!displayPortAudio && (
+              <div className="space-y-4">
+                <SettingsItem
+                  title={m.usb_device_enable_audio_title()}
+                  description={m.usb_device_enable_audio_description()}
+                >
+                  <Checkbox
+                    checked={usbDeviceConfig.audio}
+                    onChange={onUsbConfigItemChange("audio")}
+                  />
+                </SettingsItem>
+              </div>
+            )}
             {usbSerial && (
               <div className="space-y-4">
                 <SettingsItem
@@ -271,7 +272,9 @@ export function UsbDeviceSetting() {
               size="SM"
               theme="light"
               text={m.usb_device_restore_default()}
-              onClick={() => handleUsbConfigChange(defaultUsbDeviceConfig)}
+              onClick={() =>
+                handleUsbConfigChange({ ...defaultUsbDeviceConfig, audio: !displayPortAudio })
+              }
             />
           </div>
         </div>

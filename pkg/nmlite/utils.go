@@ -30,6 +30,7 @@ func sortAndCompareStringSlices(a, b []string) bool {
 		return false
 	}
 
+	a = append([]string(nil), a...)
 	sort.Strings(a)
 	sort.Strings(b)
 
@@ -53,6 +54,7 @@ func sortAndCompareIPv6AddressSlices(a, b []types.IPv6Address) bool {
 		return false
 	}
 
+	a = append([]types.IPv6Address(nil), a...)
 	sortIPv6AddressSlicesStable(a)
 	sortIPv6AddressSlicesStable(b)
 

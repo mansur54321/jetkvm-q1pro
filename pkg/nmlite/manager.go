@@ -6,6 +6,7 @@ package nmlite
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/jetkvm/kvm/internal/sync"
 
@@ -64,6 +65,19 @@ func (nm *NetworkManager) Domain() string {
 
 // AddInterface adds a new network interface to be managed
 func (nm *NetworkManager) AddInterface(iface string, config *types.NetworkConfig) error {
+	return nm.addInterface(iface, config, 0, false)
+}
+
+// WatchInterface monitors late drivers and carrier. Its metric also names a
+// dedicated IPv4 policy table for responses from this interface.
+func (nm *NetworkManager) WatchInterface(iface string, config *types.NetworkConfig, routeMetric int) error {
+	if routeMetric <= 0 || (routeMetric >= 253 && routeMetric <= 255) || routeMetric >= 10000 {
+		return fmt.Errorf("route metric %d cannot be used as a private policy table", routeMetric)
+	}
+	return nm.addInterface(iface, config, routeMetric, true)
+}
+
+func (nm *NetworkManager) addInterface(iface string, config *types.NetworkConfig, routeMetric int, watch bool) error {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 
@@ -100,7 +114,13 @@ func (nm *NetworkManager) AddInterface(iface string, config *types.NetworkConfig
 		return nm.resolvConf.SetInterfaceConfig(iface, family, *resolvConf)
 	})
 
+	im.routeMetric = routeMetric
 	nm.interfaces[iface] = im
+	if watch {
+		im.wg.Add(1)
+		go im.watchInterface()
+		return nil
+	}
 
 	// Start monitoring the interface
 	if err := im.Start(); err != nil {
@@ -115,18 +135,19 @@ func (nm *NetworkManager) AddInterface(iface string, config *types.NetworkConfig
 // RemoveInterface removes a network interface from management
 func (nm *NetworkManager) RemoveInterface(iface string) error {
 	nm.mu.Lock()
-	defer nm.mu.Unlock()
 
 	im, exists := nm.interfaces[iface]
 	if !exists {
+		nm.mu.Unlock()
 		return fmt.Errorf("interface %s not managed", iface)
 	}
 
+	delete(nm.interfaces, iface)
+	nm.mu.Unlock()
 	if err := im.Stop(); err != nil {
 		nm.logger.Error().Err(err).Str("interface", iface).Msg("failed to stop interface manager")
 	}
 
-	delete(nm.interfaces, iface)
 	nm.logger.Info().Str("interface", iface).Msg("removed interface from network manager")
 	return nil
 }
@@ -225,7 +246,7 @@ func (nm *NetworkManager) shouldKillLegacyDHCPClients() bool {
 			return true
 		}
 
-		if im.config.IPv4Mode.String != "dhcp" {
+		if im.GetConfig().IPv4Mode.String != "dhcp" {
 			return true
 		}
 	}
@@ -243,18 +264,37 @@ func (nm *NetworkManager) CleanUpLegacyDHCPClients() error {
 
 // Stop stops the network manager and all managed interfaces
 func (nm *NetworkManager) Stop() error {
+	nm.cancel()
 	nm.mu.Lock()
-	defer nm.mu.Unlock()
+	interfaces := nm.interfaces
+	nm.interfaces = make(map[string]*InterfaceManager)
+	nm.mu.Unlock()
 
 	var lastErr error
-	for iface, im := range nm.interfaces {
+	for iface, im := range interfaces {
 		if err := im.Stop(); err != nil {
 			nm.logger.Error().Err(err).Str("interface", iface).Msg("failed to stop interface manager")
 			lastErr = err
 		}
 	}
 
-	nm.cancel()
 	nm.logger.Info().Msg("network manager stopped")
 	return lastErr
+}
+
+func (nm *NetworkManager) orderedInterfaces() []*InterfaceManager {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	interfaces := make([]*InterfaceManager, 0, len(nm.interfaces))
+	for _, im := range nm.interfaces {
+		interfaces = append(interfaces, im)
+	}
+	sort.Slice(interfaces, func(i, j int) bool {
+		a, b := interfaces[i], interfaces[j]
+		if a.routeMetric != b.routeMetric {
+			return a.routeMetric < b.routeMetric
+		}
+		return a.ifaceName < b.ifaceName
+	})
+	return interfaces
 }

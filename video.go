@@ -2,6 +2,7 @@ package kvm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -37,6 +38,8 @@ func rpcGetVideoState() (rpcVideoState, error) {
 	return currentVideoState(), nil
 }
 
+var errFixedEDID = errors.New("the Q1 Pro DisplayPort bridge manages its own EDID")
+
 var (
 	hostDisplayAdvertiseLock = sync.Mutex{}
 	hostDisplayAdvertised    bool
@@ -65,7 +68,7 @@ func isHostDisplayAdvertised() bool {
 }
 
 func shouldAdvertiseHostDisplayLocked() bool {
-	return !config.HideDisplayWhenIdle || getActiveSessions() > 0 || osServicesDisplayEDID() != ""
+	return isQ1Pro() || !config.HideDisplayWhenIdle || getActiveSessions() > 0 || osServicesDisplayEDID() != ""
 }
 
 func setHostDisplayAdvertised(enabled bool, reason string, force bool) error {
@@ -76,6 +79,12 @@ func setHostDisplayAdvertised(enabled bool, reason string, force bool) error {
 }
 
 func setHostDisplayAdvertisedLocked(enabled bool, reason string, force bool) error {
+	if isQ1Pro() {
+		if !enabled {
+			return errFixedEDID
+		}
+		return nil
+	}
 	if !force && enabled == hostDisplayAdvertised {
 		return nil
 	}

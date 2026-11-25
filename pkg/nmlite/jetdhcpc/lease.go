@@ -35,9 +35,9 @@ type Lease struct {
 
 // ToDHCPLease converts a lease to a DHCP lease.
 func (l *Lease) ToDHCPLease() *types.DHCPLease {
-	lease := &l.DHCPLease
+	lease := l.DHCPLease
 	lease.DHCPClient = "jetdhcpc"
-	return lease
+	return &lease
 }
 
 // fromNclient4Lease creates a lease from a nclient4.Lease.

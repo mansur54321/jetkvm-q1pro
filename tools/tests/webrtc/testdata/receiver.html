@@ -1,0 +1,144 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>JetKVM WebRTC test receiver</title>
+<video autoplay muted playsinline></video>
+<script>
+async function post(path, data) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+async function receive() {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+  const codecs = RTCRtpReceiver.getCapabilities("video").codecs
+    .filter(codec => codec.mimeType.toLowerCase() === "video/h264");
+  if (!codecs.length) throw new Error("Chromium has no H.264 receiver");
+  transceiver.setCodecPreferences(codecs);
+
+  const audioReceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+  audioReceiver.setCodecPreferences(RTCRtpReceiver.getCapabilities("audio").codecs
+    .filter(codec => codec.mimeType.toLowerCase() === "audio/g722"));
+  const audioContext = new AudioContext();
+  const analyser = audioContext.createAnalyser();
+  analyser.fftSize = 4096;
+  const spectrum = new Float32Array(analyser.frequencyBinCount);
+  const silent = audioContext.createGain();
+  silent.gain.value = 0;
+  analyser.connect(silent).connect(audioContext.destination);
+  await audioContext.resume();
+  const video = document.querySelector("video");
+  const canvas = document.createElement("canvas");
+  canvas.width = 16;
+  canvas.height = 12;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const frameHashes = new Set();
+  let presentations = 0;
+  function countFrame() {
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let hash = 2166136261;
+    for (const byte of pixels) hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+    frameHashes.add(hash);
+    presentations++;
+    video.requestVideoFrameCallback(countFrame);
+  }
+  pc.ontrack = ({ track }) => {
+    if (track.kind === "audio") {
+      const stream = new MediaStream([track]);
+      // Chromium needs an attached element to pull remote audio through Web Audio.
+      const audio = document.body.appendChild(document.createElement("audio"));
+      audio.srcObject = stream;
+      audio.autoplay = true;
+      audio.muted = true;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      return;
+    }
+    video.srcObject = new MediaStream([track]);
+    video.requestVideoFrameCallback(countFrame);
+  };
+
+  await pc.setLocalDescription(await pc.createOffer());
+  if (pc.iceGatheringState !== "complete") {
+    await new Promise(resolve => pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") resolve();
+    }));
+  }
+  const answer = await post("/offer", pc.localDescription);
+  if (!answer.ok) throw new Error(await answer.text());
+  await pc.setRemoteDescription(await answer.json());
+
+  const recovery = new URLSearchParams(location.search).has("clock-recovery");
+  const deadline = performance.now() + (recovery ? 24000 : 15000);
+  const sample = {};
+  let pausedAt = 0;
+  let lastPacketAt = 0;
+  let lastPacketCount = -1;
+  while (performance.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const report = await pc.getStats();
+    for (const stat of report.values()) {
+      if (stat.type !== "inbound-rtp") continue;
+      if (stat.kind === "audio") {
+        sample.audioPackets = stat.packetsReceived;
+        sample.audioCodec = report.get(stat.codecId)?.mimeType;
+        analyser.getFloatFrequencyData(spectrum);
+        const peak = Math.max(...spectrum);
+        sample.toneHz = peak > -65 ? Math.round(spectrum.indexOf(peak) * audioContext.sampleRate / analyser.fftSize) : 0;
+        if (recovery) {
+          sample.peakDb = Number.isFinite(peak) ? Math.round(peak) : null;
+          sample.audioEnergy = stat.totalAudioEnergy;
+          sample.concealed = stat.concealedSamples;
+          sample.played = stat.jitterBufferEmittedCount;
+          sample.audioLevel = stat.audioLevel;
+        }
+        continue;
+      }
+      if (stat.kind !== "video") continue;
+      Object.assign(sample, {
+        codec: report.get(stat.codecId)?.mimeType,
+        decoded: stat.framesDecoded,
+        keyframes: stat.keyFramesDecoded,
+        packets: stat.packetsReceived,
+        dropped: stat.framesDropped,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        presentations,
+        uniqueCanvas: frameHashes.size,
+      });
+    }
+    const now = performance.now();
+    if (pausedAt) {
+      sample.quietMs = Math.max(sample.quietMs, Math.floor(now - lastPacketAt));
+      if (sample.audioPackets !== lastPacketCount) {
+        lastPacketCount = sample.audioPackets;
+        lastPacketAt = now;
+      }
+    }
+    const firstTone = sample.toneHz >= 960 && sample.toneHz <= 1035;
+    if (sample.decoded >= 30 && frameHashes.size >= 10 && sample.audioPackets >= 30) {
+      if (recovery && !pausedAt && firstTone) {
+        const response = await post("/pause-clock", {});
+        if (!response.ok) throw new Error("could not pause the source clock");
+        sample.firstToneHz = sample.toneHz;
+        sample.quietMs = 0;
+        lastPacketCount = sample.audioPackets;
+        pausedAt = lastPacketAt = performance.now();
+        continue;
+      }
+      if (recovery) {
+        if (!pausedAt || now - pausedAt < 5800 || sample.quietMs < 4500 ||
+            !(sample.toneHz >= 1470 && sample.toneHz <= 1550)) continue;
+      } else if (!firstTone) continue;
+      await post("/result", sample);
+      pc.close();
+      return;
+    }
+  }
+  throw new Error(`video timeout (ICE ${pc.iceConnectionState}): ${JSON.stringify(sample)}`);
+}
+receive().catch(error => post("/result", { error: String(error) }));
+</script>

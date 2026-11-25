@@ -303,10 +303,16 @@ export const useMouseStore = create<MouseState>(set => ({
   setMousePosition: (x, y) => set({ mouseX: x, mouseY: y }),
 }));
 
-export type HdmiStates = "ready" | "no_signal" | "no_lock" | "out_of_range" | "connecting";
+export type HdmiStates =
+  | "ready"
+  | "no_signal"
+  | "no_lock"
+  | "out_of_range"
+  | "device_unavailable"
+  | "connecting";
 export type HdmiErrorStates = Extract<
   VideoState["hdmiState"],
-  "no_signal" | "no_lock" | "out_of_range"
+  "no_signal" | "no_lock" | "out_of_range" | "device_unavailable"
 >;
 
 export interface HdmiState {
@@ -918,11 +924,16 @@ export type Capability =
   | "shell"
   | "extensions"
   | "usb_serial"
+  | "displayport_audio"
+  | "fixed_edid"
+  | "manual_hevc"
+  | "wireguard"
   | "custom_edid"
   | "upload_channel"
   | "video_during_update" // video keeps streaming while an update installs
   | "removable_storage" // images live on a card that can be missing or unformatted
   | "wifi" // Wi-Fi networks and frequency band
+  | "bluetooth_wifi" // physical Wi-Fi setup and transfer
   | "http_proxy" // network settings the device can change
   | "domain"
   | "mdns"
@@ -932,6 +943,7 @@ export type Capability =
   | "log_level" // default log level can be changed
   | "tailscale" // Tailscale client
   | "os_services" // USB link to the OS Services sender on the remote host (clipboard, file drop, shell)
+  | "storage_download_only"
   | "storage_download"; // device downloads an image from a URL into its storage
 
 export const useDeviceStore = create<DeviceState>(set => ({
@@ -1026,6 +1038,13 @@ export interface TailscalePeer {
 }
 
 export interface TailscaleStatus {
+  addon?: {
+    enabled: boolean;
+    version: string;
+    archiveBytes: number;
+    requiredBytes: number;
+    freeBytes: number;
+  };
   installed: boolean;
   running: boolean;
   backendState?: string;
@@ -1079,6 +1098,7 @@ export interface IPv6StaticConfig {
 }
 
 export interface NetworkSettings {
+  fixed_dhcp_client?: boolean;
   dhcp_client: string;
   hostname: string | null;
   domain: string | null;

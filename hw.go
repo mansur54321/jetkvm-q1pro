@@ -93,6 +93,10 @@ func GetDeviceID() string {
 var deviceSKU string
 var deviceSKUOnce sync.Once
 
+const q1ProSKU = "oraybox-q1pro"
+
+func isQ1Pro() bool { return GetDeviceSKU() == q1ProSKU }
+
 func GetDeviceSKU() string {
 	deviceSKUOnce.Do(func() {
 		content, err := os.ReadFile("/etc/jetkvm-sku")

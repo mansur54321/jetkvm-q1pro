@@ -32,6 +32,9 @@ func (s *State) GetReleaseAPIEndpoint() string {
 
 // getUpdateURL returns the update URL for the given parameters
 func (s *State) getUpdateURL(params UpdateParams) (string, error, bool) {
+	if s.releaseAPIEndpoint == "" {
+		return "", errors.New("this board requires a board-specific firmware image"), false
+	}
 	updateURL, err := url.Parse(s.releaseAPIEndpoint)
 	if err != nil {
 		return "", fmt.Errorf("error parsing update metadata URL: %w", err), false

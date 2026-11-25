@@ -1,0 +1,7 @@
+lib/firmware/regulatory.db
+lib/firmware/aic8800/fmacfw_8800d80_h_u02.bin
+lib/firmware/aic8800/fmacfw_8800d80_u02.bin
+lib/firmware/aic8800/fw_adid_8800d80_u02.bin
+lib/firmware/aic8800/fw_patch_8800d80_u02.bin
+lib/firmware/aic8800/fw_patch_table_8800d80_u02.bin
+lib/firmware/aic8800/lmacfw_rf_8800d80_u02.bin

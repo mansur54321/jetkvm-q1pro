@@ -129,7 +129,7 @@ export default function WebRTCVideo({
     osServices && (videoSource === "switching_to_guest" || videoSource === "switching_to_physical");
   const [sourceSwitchTimedOut, setSourceSwitchTimedOut] = useState(false);
   const showSourceSwitchOverlay = isSourceSwitching && !sourceSwitchTimedOut;
-  const rawHdmiError = ["no_lock", "no_signal", "out_of_range"].includes(hdmiState);
+  const rawHdmiError = ["no_lock", "no_signal", "out_of_range", "device_unavailable"].includes(hdmiState);
   const [isInitialHdmiErrorGraceActive, setIsInitialHdmiErrorGraceActive] = useState(false);
   const hdmiError = rawHdmiError && !isInitialHdmiErrorGraceActive;
 

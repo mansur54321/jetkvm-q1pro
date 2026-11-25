@@ -1,9 +1,12 @@
 package nmlite
 
-import "net"
+import (
+	"github.com/jetkvm/kvm/internal/network/types"
+	"net"
+)
 
 func (nm *NetworkManager) IsOnline() bool {
-	for _, iface := range nm.interfaces {
+	for _, iface := range nm.orderedInterfaces() {
 		if iface.IsOnline() {
 			return true
 		}
@@ -12,7 +15,7 @@ func (nm *NetworkManager) IsOnline() bool {
 }
 
 func (nm *NetworkManager) IsUp() bool {
-	for _, iface := range nm.interfaces {
+	for _, iface := range nm.orderedInterfaces() {
 		if iface.IsUp() {
 			return true
 		}
@@ -30,7 +33,7 @@ func (nm *NetworkManager) FQDN() string {
 
 func (nm *NetworkManager) NTPServers() []net.IP {
 	servers := []net.IP{}
-	for _, iface := range nm.interfaces {
+	for _, iface := range nm.orderedInterfaces() {
 		servers = append(servers, iface.NTPServers()...)
 	}
 	return servers
@@ -45,50 +48,62 @@ func (nm *NetworkManager) NTPServerStrings() []string {
 }
 
 func (nm *NetworkManager) GetIPv4Addresses() []string {
-	for _, iface := range nm.interfaces {
-		return iface.GetIPv4Addresses()
+	addresses := []string{}
+	for _, iface := range nm.orderedInterfaces() {
+		addresses = append(addresses, iface.GetIPv4Addresses()...)
 	}
-	return []string{}
+	return addresses
 }
 
 func (nm *NetworkManager) GetIPv4Address() string {
-	for _, iface := range nm.interfaces {
-		return iface.GetIPv4Address()
+	for _, iface := range nm.orderedInterfaces() {
+		if value := iface.GetIPv4Address(); value != "" {
+			return value
+		}
 	}
 	return ""
 }
 
 func (nm *NetworkManager) GetIPv6Address() string {
-	for _, iface := range nm.interfaces {
-		return iface.GetIPv6Address()
+	for _, iface := range nm.orderedInterfaces() {
+		if value := iface.GetIPv6Address(); value != "" {
+			return value
+		}
 	}
 	return ""
 }
 
 func (nm *NetworkManager) GetIPv6Addresses() []string {
-	for _, iface := range nm.interfaces {
-		return iface.GetIPv6Addresses()
+	addresses := []string{}
+	for _, iface := range nm.orderedInterfaces() {
+		addresses = append(addresses, iface.GetIPv6Addresses()...)
 	}
-	return []string{}
+	return addresses
 }
 
 func (nm *NetworkManager) GetMACAddress() string {
-	for _, iface := range nm.interfaces {
-		return iface.GetMACAddress()
+	for _, iface := range nm.orderedInterfaces() {
+		if mac := iface.GetMACAddress(); mac != "" {
+			return mac
+		}
 	}
 	return ""
 }
 
 func (nm *NetworkManager) IPv4Ready() bool {
-	for _, iface := range nm.interfaces {
-		return iface.IPv4Ready()
+	for _, iface := range nm.orderedInterfaces() {
+		if iface.IPv4Ready() {
+			return true
+		}
 	}
 	return false
 }
 
 func (nm *NetworkManager) IPv6Ready() bool {
-	for _, iface := range nm.interfaces {
-		return iface.IPv6Ready()
+	for _, iface := range nm.orderedInterfaces() {
+		if iface.IPv6Ready() {
+			return true
+		}
 	}
 	return false
 }
@@ -103,4 +118,23 @@ func (nm *NetworkManager) IPv6String() string {
 
 func (nm *NetworkManager) MACString() string {
 	return nm.GetMACAddress()
+}
+
+// PrimaryState prefers an addressed interface, then carrier, then configured order.
+func (nm *NetworkManager) PrimaryState() *types.InterfaceState {
+	var best *types.InterfaceState
+	for _, im := range nm.orderedInterfaces() {
+		state := im.GetState()
+		state.Hostname = nm.Hostname()
+		if state.Online {
+			return state
+		}
+		if best == nil || (state.Up && !best.Up) {
+			best = state
+		}
+	}
+	if best == nil {
+		return &types.InterfaceState{}
+	}
+	return best
 }

@@ -1,0 +1,49 @@
+--- a/fs/squashfs/super.c
++++ b/fs/squashfs/super.c
+@@ -69,6 +69,7 @@
+ {
+ 	struct squashfs_sb_info *msblk;
+ 	struct squashfs_super_block *sblk = NULL;
++	bool q1_sfoo = false;
+ 	struct inode *root;
+ 	long long root_inode;
+ 	unsigned short flags;
+@@ -108,6 +109,19 @@
+ 
+ 	err = -EINVAL;
+ 
++	/* Q1 test-only SFOO layout, inverse of tools/q1pro-image/stock.py convert. */
++	if (!memcmp(&sblk->s_magic, "SFOO", 4)) {
++		__le32 *words = (__le32 *)sblk;
++		__le16 *shorts = (__le16 *)((char *)sblk + 20);
++		__le16 last = shorts[3];
++		q1_sfoo = true;
++		sblk->s_magic = cpu_to_le32(SQUASHFS_MAGIC);
++		swap(words[1], words[2]);
++		shorts[3] = shorts[2];
++		shorts[2] = shorts[1];
++		shorts[1] = shorts[0];
++		shorts[0] = last;
++	}
+ 	/* Check it is a SQUASHFS superblock */
+ 	sb->s_magic = le32_to_cpu(sblk->s_magic);
+ 	if (sb->s_magic != SQUASHFS_MAGIC) {
+@@ -324,6 +338,9 @@
+ 
+ 	TRACE("Leaving squashfs_fill_super\n");
+ 	kfree(sblk);
++	if (q1_sfoo)
++		sb->s_magic = 0x4f4f4653;
++
+ 	return 0;
+ 
+ insanity:
+@@ -373,7 +390,7 @@
+ 
+ 	TRACE("Entered squashfs_statfs\n");
+ 
+-	buf->f_type = SQUASHFS_MAGIC;
++	buf->f_type = dentry->d_sb->s_magic;
+ 	buf->f_bsize = msblk->block_size;
+ 	buf->f_blocks = ((msblk->bytes_used - 1) >> msblk->block_log) + 1;
+ 	buf->f_bfree = buf->f_bavail = 0;

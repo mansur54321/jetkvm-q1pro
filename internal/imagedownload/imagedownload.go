@@ -274,15 +274,14 @@ func (d *Downloader) transfer(ctx context.Context, u *neturl.URL, filename strin
 	}
 
 	size := max(resp.ContentLength, 0)
-	if size > 0 {
-		free, err := d.FreeSpace()
-		if err != nil {
-			return fmt.Errorf("failed to read the free space: %w", err)
-		}
-		if size > free {
-			return ErrNoSpace
-		}
+	free, err := d.FreeSpace()
+	if err != nil {
+		return fmt.Errorf("failed to read the free space: %w", err)
 	}
+	if size > free {
+		return ErrNoSpace
+	}
+
 	d.mu.Lock()
 	d.state.Size = size
 	d.mu.Unlock()
@@ -307,6 +306,10 @@ func (d *Downloader) transfer(ctx context.Context, u *neturl.URL, filename strin
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
 			stall.Reset(stallTimeout)
+			if int64(n) > free {
+				return ErrNoSpace
+			}
+			free -= int64(n)
 			if _, err := file.Write(buf[:n]); err != nil {
 				return err
 			}

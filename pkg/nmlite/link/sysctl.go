@@ -50,3 +50,13 @@ func (nm *NetlinkManager) EnableIPv6LinkLocal(ifaceName string) error {
 		"net.ipv6.conf.%s.accept_ra":    0,
 	})
 }
+
+// SetMultiInterfaceIPv4 keeps ARP replies and announcements local to the
+// addressed interface and permits replies through separate uplinks.
+func (nm *NetlinkManager) SetMultiInterfaceIPv4(ifaceName string) error {
+	return nm.setSysctlValues(ifaceName, map[string]int{
+		"net.ipv4.conf.%s.arp_ignore":   1,
+		"net.ipv4.conf.%s.arp_announce": 2,
+		"net.ipv4.conf.%s.rp_filter":    2,
+	})
+}

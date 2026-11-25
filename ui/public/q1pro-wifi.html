@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
+<title>Wi-Fi · JetKVM Q1 Pro</title>
+<style>
+:root { color-scheme: light dark; font: 1rem/1.5 system-ui, sans-serif; }
+body { max-width: 31rem; margin: 0 auto; padding: 2rem 1.25rem; }
+h1 { font-size: 1.65rem; margin: .5rem 0; }
+p { margin: .7rem 0 1.1rem; }
+label { display: block; font-weight: 600; margin: 1rem 0 .3rem; }
+input, button { font: inherit; box-sizing: border-box; min-height: 44px; border-radius: .45rem; padding: .5rem .75rem; }
+input { width: 100%; border: 1px solid #8493a6; background: Canvas; color: CanvasText; }
+button { border: 1px solid transparent; background: #155bb5; color: white; cursor: pointer; }
+button:disabled { opacity: .6; cursor: default; }
+:focus-visible { outline: 3px solid #5098ef; outline-offset: 3px; }
+fieldset { border: 0; padding: 0; margin: 1rem 0; }
+#send { margin-top: 1.1rem; }
+#message { min-height: 1.5em; }
+a { overflow-wrap: anywhere; }
+</style>
+<main>
+  <h1 id="heading">Wi-Fi · JetKVM Q1 Pro</h1>
+  <p id="help">На новом Q1 или после разрешения владельца дважды коротко нажмите кнопку. На настроенном Q1 без такого разрешения нажмите пять раз подряд. Когда синий индикатор замигает, выберите Q1.</p>
+  <button type="button" id="pair">Выбрать Q1</button>
+  <p id="message" role="status" aria-live="polite"></p>
+  <form id="form" autocomplete="off">
+    <fieldset disabled id="credentials">
+      <label id="ssidLabel" for="ssid">Имя сети Wi-Fi</label>
+      <input id="ssid" required autocapitalize="none" spellcheck="false" maxlength="32">
+      <label id="passLabel" for="pass">Пароль Wi-Fi</label>
+      <input id="pass" type="password" autocomplete="off" maxlength="64">
+      <button id="send" type="submit">Подключить Q1</button>
+    </fieldset>
+  </form>
+  <a id="link" hidden rel="noreferrer noopener"></a>
+</main>
+<script>
+"use strict";
+const en = !navigator.language.toLowerCase().startsWith("ru");
+const t = (ru, english) => en ? english : ru;
+const el = id => document.getElementById(id);
+document.documentElement.lang = en ? "en" : "ru";
+el("help").textContent = t("На новом Q1 или после разрешения владельца дважды коротко нажмите кнопку. На настроенном Q1 без такого разрешения нажмите пять раз подряд. Когда синий индикатор замигает, выберите Q1.", "Briefly press the button twice on a new Q1 or after the owner enables handoff. For a configured Q1 without handoff, press it five times in quick succession. Select the Q1 when its blue LED blinks.");
+el("pair").textContent = t("Выбрать Q1", "Select Q1");
+el("ssidLabel").textContent = t("Имя сети Wi-Fi", "Wi-Fi network name");
+el("passLabel").textContent = t("Пароль Wi-Fi", "Wi-Fi password");
+el("send").textContent = t("Подключить Q1", "Connect Q1");
+const message = text => { el("message").textContent = text; };
+const uuid = n => "00467768-6228-2272-4663-27747826800" + n;
+const text = new TextEncoder();
+let active, state = 0, command, pending = false, result = [];
+function refresh() { el("credentials").disabled = !command || state !== 2 || pending; }
+function updateState(v) {
+  state = v;
+  pending = v === 3;
+  const states = [ "", t("Коротко нажмите кнопку на корпусе Q1 для подтверждения.", "Briefly press the Q1 button to confirm."),
+    t("Введите данные Wi-Fi. При запросе сопряжения и голубом мигании ещё раз коротко нажмите кнопку Q1 и подтвердите на телефоне.", "Enter the Wi-Fi credentials. If a pairing prompt appears and the Q1 blinks cyan, briefly press its button again and confirm on the phone."), t("Q1 подключается к сети…", "Q1 is joining the network…"),
+    t("Q1 подключён к Wi-Fi.", "Q1 is connected to Wi-Fi.") ];
+  if (states[v]) message(states[v]);
+  refresh();
+}
+function onResult(view) {
+  result.push(...new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+  if (result.length < 2) return;
+  const size = result[1];
+  if (result.length < size + 3) return;
+  const b = result; result = [];
+  if (b.length !== size + 3 || b[0] !== 1 || (b.slice(0,-1).reduce((a,v) => a+v,0) & 255) !== b.at(-1) ||
+      !b[2] || b[2] + 1 > size) return;
+  try {
+    const url = new URL(new TextDecoder().decode(Uint8Array.from(b.slice(3, 3+b[2]))));
+    if (!["http:","https:"].includes(url.protocol) || url.username || url.password) return;
+    const link = el("link"); link.href = url.href; link.textContent = url.origin; link.hidden = false;
+  } catch { /* A URL is optional in the Improv result. */ }
+}
+async function pair() {
+  if (!navigator.bluetooth || !window.isSecureContext) {
+    message(t("Для Bluetooth откройте эту страницу по HTTPS в Chrome для Android или Bluefy для iPhone.", "For Bluetooth, open this page over HTTPS in Chrome on Android or Bluefy on iPhone."));
+    return;
+  }
+  el("pair").disabled = true;
+  let device;
+  try {
+    device = await navigator.bluetooth.requestDevice({filters:[{services:[uuid(0)]}]});
+    const previous = active; active = device;
+    if (previous && previous !== device) previous.gatt.disconnect();
+    command = null; state = 0; pending = false; result = []; refresh();
+    el("link").hidden = true;
+    device.addEventListener("gattserverdisconnected", () => {
+      if (active !== device) return;
+      active = null; command = null; el("pass").value = ""; refresh();
+      if (state !== 4) message(t("Связь Bluetooth закрыта. Для повторной попытки снова выберите Q1.", "Bluetooth disconnected. Select the Q1 again to retry."));
+    }, {once:true});
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(uuid(0));
+    const current = await svc.getCharacteristic(uuid(1));
+    const errors = await svc.getCharacteristic(uuid(2));
+    const replies = await svc.getCharacteristic(uuid(4));
+    command = await svc.getCharacteristic(uuid(3));
+    for (const [ch,fn] of [[current,v=>updateState(v.getUint8(0))], [errors,v=>{
+      const code = v.getUint8(0);
+      if (code) {
+        pending=false; refresh();
+        message(code===3 ? t("Не удалось подключиться. Проверьте сеть и пароль.", "Connection failed. Check the network name and password.") :
+          t("Q1 отклонил запрос. Проверьте подтверждение кнопкой.", "Q1 declined the request. Check the button authorization."));
+      }
+    }], [replies,onResult]]) {
+      ch.addEventListener("characteristicvaluechanged", ev => { if (active===device) fn(ev.target.value); });
+      await ch.startNotifications();
+    }
+    updateState((await current.readValue()).getUint8(0));
+  } catch (error) {
+    if (device && device.gatt.connected) device.gatt.disconnect();
+    message(t("Не удалось выбрать или подключить Q1.", "Could not select or connect to the Q1."));
+  } finally { el("pair").disabled = false; }
+}
+el("pair").addEventListener("click", pair);
+el("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  if (!command || state!==2 || pending) return;
+  const ssid = text.encode(el("ssid").value), password = text.encode(el("pass").value);
+  if (!ssid.length || ssid.length>32 || password.length>64) {
+    message(t("Имя сети — до 32 байт, пароль — до 64 байт.", "Use at most 32 bytes for the network name and 64 bytes for the password.")); return;
+  }
+  const frame = Uint8Array.from([1, 2+ssid.length+password.length, ssid.length, ...ssid, password.length, ...password, 0]);
+  frame[frame.length-1] = frame.reduce((a,b)=>a+b,0) & 255;
+  const target = command;
+  pending=true; refresh();
+  try {
+    for (let i=0;i<frame.length;i+=20) {
+      const part=frame.slice(i,i+20);
+      if (target.writeValueWithResponse) await target.writeValueWithResponse(part);
+      else await target.writeValue(part);
+    }
+    el("pass").value = "";
+  } catch {
+    pending=false; refresh();
+    message(t("Передача не завершилась. При голубом мигании коротко нажмите кнопку Q1, подтвердите сопряжение на телефоне и выберите Q1 ещё раз.", "Transfer failed. When the Q1 blinks cyan, press its button, confirm pairing on the phone and select the Q1 again."));
+  } finally { password.fill(0); frame.fill(0); }
+});
+if (!window.isSecureContext || !navigator.bluetooth) {
+  el("pair").disabled=true;
+  message(t("Для Bluetooth откройте эту страницу по HTTPS в Chrome для Android или Bluefy для iPhone.", "For Bluetooth, open this page over HTTPS in Chrome on Android or Bluefy on iPhone."));
+}
+</script>
+</html>

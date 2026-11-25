@@ -23,6 +23,7 @@ enum {
 	JK_SND_PCM_ACCESS_RW_INTERLEAVED = 3,
 	JK_SND_PCM_FORMAT_S16_LE = 2,
 	JK_SND_PCM_NONBLOCK = 1,
+	JK_SND_PCM_STATE_PREPARED = 2,
 };
 
 typedef struct {
@@ -49,6 +50,7 @@ typedef struct {
 	int (*pcm_wait)(snd_pcm_t *pcm, int timeout);
 	snd_pcm_sframes_t (*pcm_readi)(snd_pcm_t *pcm, void *buffer, snd_pcm_uframes_t size);
 	int (*pcm_recover)(snd_pcm_t *pcm, int err, int silent);
+	int (*pcm_state)(snd_pcm_t *pcm);
 	const char *(*strerror)(int errnum);
 } jk_alsa_api;
 
@@ -100,6 +102,7 @@ static int jk_alsa_load(char *errbuf, int errbuf_len) {
 	err |= jk_load_sym((void **)&jk_alsa.pcm_wait, "snd_pcm_wait");
 	err |= jk_load_sym((void **)&jk_alsa.pcm_readi, "snd_pcm_readi");
 	err |= jk_load_sym((void **)&jk_alsa.pcm_recover, "snd_pcm_recover");
+	err |= jk_load_sym((void **)&jk_alsa.pcm_state, "snd_pcm_state");
 	err |= jk_load_sym((void **)&jk_alsa.strerror, "snd_strerror");
 	if (err != 0) {
 		snprintf(errbuf, errbuf_len, "failed to load required ALSA symbol");
@@ -163,7 +166,7 @@ static int jk_configure_capture(jk_alsa_capture *capture, int format, unsigned i
 	if (err < 0) goto fail_prepare;
 	err = jk_alsa.pcm_start(capture->pcm);
 	if (err < 0) goto fail_start_stream;
-	err = jk_alsa.pcm_nonblock(capture->pcm, 0);
+	err = jk_alsa.pcm_nonblock(capture->pcm, 1);
 	if (err < 0) goto fail_blocking_mode;
 
 	capture->channels = channels;
@@ -236,14 +239,23 @@ static jk_alsa_capture *jk_alsa_capture_open(const char *device, int format, uns
 	return capture;
 }
 
+static int jk_resume_capture(jk_alsa_capture *capture, int error) {
+	int rc = jk_alsa.pcm_recover(capture->pcm, error, 1);
+	if (rc < 0) return rc;
+	// ALSA leaves capture PREPARED after XRUN. Waiting before the next read
+	// only delivers periods after the capture stream has been restarted.
+	if (jk_alsa.pcm_state(capture->pcm) == JK_SND_PCM_STATE_PREPARED)
+		return jk_alsa.pcm_start(capture->pcm);
+	return 0;
+}
+
 static int jk_alsa_capture_read(jk_alsa_capture *capture, void *buffer, unsigned long frames) {
 	int wait_rc = jk_alsa.pcm_wait(capture->pcm, 100);
 	if (wait_rc == 0) {
 		return 0;
 	}
 	if (wait_rc < 0) {
-		int recovered = jk_alsa.pcm_recover(capture->pcm, wait_rc, 1);
-		return recovered >= 0 ? 0 : wait_rc;
+		return jk_resume_capture(capture, wait_rc);
 	}
 
 	snd_pcm_sframes_t rc = jk_alsa.pcm_readi(capture->pcm, buffer, frames);
@@ -256,12 +268,7 @@ static int jk_alsa_capture_read(jk_alsa_capture *capture, void *buffer, unsigned
 		return 0;
 	}
 
-	int recovered = jk_alsa.pcm_recover(capture->pcm, (int)rc, 1);
-	if (recovered >= 0) {
-		return 0;
-	}
-
-	return (int)rc;
+	return jk_resume_capture(capture, (int)rc);
 }
 
 static void jk_alsa_capture_close(jk_alsa_capture *capture) {

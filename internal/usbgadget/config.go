@@ -2,7 +2,9 @@ package usbgadget
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path"
 )
 
 type gadgetConfigItem struct {
@@ -262,6 +264,29 @@ func (u *UsbGadget) configureUsbGadgetLocked(resetUsb bool, forceRebind bool) (b
 		u.tx.MountConfigFS()
 		u.tx.CreateConfigPath()
 		u.tx.WriteGadgetConfig()
+		if u.waitingForUDC.Load() && u.IsGadgetAttachedToUDC() {
+			if links := u.tx.reorderSymlinkChanges; links != nil {
+				links.detectConfigFSOrder = true
+			}
+			// Missing kernel extensions such as wakeup_on_write cannot change
+			// a live function and must not trigger its conditional unlink.
+			for i := range u.tx.c.Changes {
+				change := &u.tx.c.Changes[i]
+				if change.IgnoreErrors && change.Action() == FileChangeResolvedActionCreateFile {
+					change.BeforeChange = nil
+				}
+			}
+			pending, err := u.tx.HasPendingChanges()
+			if err != nil {
+				return err
+			}
+			if !pending {
+				adopted = true
+				return nil
+			}
+			// Detach only our configfs gadget before updating its functions.
+			return os.WriteFile(path.Join(u.kvmGadgetPath, "UDC"), []byte("\n"), 0644)
+		}
 		if !resetUsb {
 			return nil
 		}

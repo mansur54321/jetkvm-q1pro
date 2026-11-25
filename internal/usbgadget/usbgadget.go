@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"sync/atomic"
 	"time"
 
 	"github.com/jetkvm/kvm/internal/logging"
@@ -54,8 +55,13 @@ type KeysDownState struct {
 
 // UsbGadget is a struct that represents a USB gadget.
 type UsbGadget struct {
-	name          string
-	udc           string
+	name string
+	udc  string
+
+	controllerDevice string
+	waitingForUDC    atomic.Bool
+	attachDisabled   bool // protected by configLock
+
 	kvmGadgetPath string
 	configC1Path  string
 
@@ -139,10 +145,15 @@ var defaultLogger = logging.GetSubsystemLogger("usbgadget")
 
 // NewUsbGadget creates a new UsbGadget.
 func NewUsbGadget(name string, enabledDevices *Devices, config *Config, logger *zerolog.Logger) *UsbGadget {
-	return newUsbGadget(name, defaultGadgetConfig, enabledDevices, config, logger)
+	return newUsbGadget(name, "", defaultGadgetConfig, enabledDevices, config, logger)
 }
 
-func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDevices *Devices, config *Config, logger *zerolog.Logger) *UsbGadget {
+// NewUsbGadgetForUDC waits for the sysfs device or device-tree node to register a UDC.
+func NewUsbGadgetForUDC(name, controller string, devices *Devices, config *Config, logger *zerolog.Logger) *UsbGadget {
+	return newUsbGadget(name, controller, defaultGadgetConfig, devices, config, logger)
+}
+
+func newUsbGadget(name, controller string, configMap map[string]gadgetConfigItem, enabledDevices *Devices, config *Config, logger *zerolog.Logger) *UsbGadget {
 	if logger == nil {
 		logger = defaultLogger
 	}
@@ -188,6 +199,12 @@ func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDev
 		logSuppressionCounter: make(map[string]int),
 
 		absMouseAccumulatedWheelY: 0,
+	}
+	if controller != "" {
+		g.controllerDevice = controller
+		g.waitingForUDC.Store(true)
+		g.loadGadgetConfig()
+		return g
 	}
 	if err := g.Init(); err != nil {
 		logger.Error().Err(err).Msg("failed to init USB gadget")

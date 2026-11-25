@@ -190,7 +190,14 @@ export default function WifiNetworksCard({ onSwitched }: { onSwitched?: () => vo
     };
   }, [adding, channel, pollScan]);
 
-  if (!settings?.available) return null;
+  if (!settings) return null;
+  if (!settings.available)
+    return (
+      <SettingsSectionHeader
+        title={m.wifi_networks_title()}
+        description={m.wifi_ble_wifi_unavailable()}
+      />
+    );
   const networks = settings.networks ?? [];
   const current = networks.find(network => network.connected)?.ssid ?? "";
   const full = networks.length >= settings.max_networks;

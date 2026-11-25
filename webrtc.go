@@ -13,6 +13,7 @@ import (
 	"github.com/jetkvm/kvm/internal/logging"
 	"github.com/jetkvm/kvm/internal/osservices"
 	"github.com/jetkvm/kvm/internal/playoutdelay"
+	"github.com/jetkvm/kvm/internal/q1tailscale"
 	"github.com/jetkvm/kvm/internal/rtpclock"
 	"github.com/jetkvm/kvm/internal/sync"
 	"github.com/jetkvm/kvm/internal/timinglog"
@@ -36,6 +37,7 @@ type Session struct {
 	AudioTrack               *webrtc.TrackLocalStaticSample
 	ControlChannel           *webrtc.DataChannel
 	RPCChannel               *webrtc.DataChannel
+	q1ControlChannel         *webrtc.DataChannel // guarded by sessionSwitchMu
 	HidChannel               *webrtc.DataChannel
 	shouldUmountVirtualMedia bool
 
@@ -172,12 +174,14 @@ type hidQueueMessage struct {
 }
 
 type SessionConfig struct {
-	ICEServers []string
-	LocalIP    string
-	IsCloud    bool
-	ws         *websocket.Conn
-	Logger     *zerolog.Logger
-	MDNSMode   string
+	UserspaceTailscaleIP string
+	TunnelMux            ice.UDPMux
+	ICEServers           []string
+	LocalIP              string
+	IsCloud              bool
+	ws                   *websocket.Conn
+	Logger               *zerolog.Logger
+	MDNSMode             string
 }
 
 // negotiateAudioCodec returns the audio MIME type to use, or "" if the browser
@@ -501,6 +505,9 @@ func newSession(config SessionConfig) (*Session, error) {
 		LoggerFactory: logging.GetPionDefaultLoggerFactory(),
 	}
 
+	if config.TunnelMux != nil {
+		webrtcSettingEngine.SetICEUDPMux(config.TunnelMux)
+	}
 	if config.MDNSMode != "" && config.MDNSMode != "disabled" {
 		webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
 	} else {
@@ -526,7 +533,11 @@ func newSession(config SessionConfig) (*Session, error) {
 		}
 	}
 
-	if config.LocalIP == "" || net.ParseIP(config.LocalIP) == nil {
+	if config.TunnelMux == nil && config.UserspaceTailscaleIP != "" {
+		if err := q1tailscale.ConfigureICE(&webrtcSettingEngine, config.UserspaceTailscaleIP); err != nil {
+			return nil, err
+		}
+	} else if config.TunnelMux != nil || config.LocalIP == "" || net.ParseIP(config.LocalIP) == nil {
 		scopedLogger.Info().Str("localIP", config.LocalIP).Msg("Local IP address not provided or invalid, won't set ICEAddressRewriteRules")
 	} else {
 		err := webrtcSettingEngine.SetICEAddressRewriteRules(
@@ -649,8 +660,16 @@ func newSession(config SessionConfig) (*Session, error) {
 				// Enqueue to ensure ordered processing
 				session.enqueueRPCMessage(msg)
 			})
+			q1 := isQ1Pro()
+			if q1 {
+				session.refreshQ1ControlLED(d)
+				d.OnClose(func() { session.refreshQ1ControlLED(nil) })
+			}
 			// Wait for channel to be open before sending initial state
 			d.OnOpen(func() {
+				if q1 {
+					session.refreshQ1ControlLED(nil)
+				}
 				go reportLocalVersionAndCapabilities(session)
 				triggerOTAStateUpdate(otaState.ToRPCState())
 				triggerVideoStateUpdate()

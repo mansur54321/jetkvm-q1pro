@@ -47,6 +47,7 @@ func takeOverCurrentSession(next *Session) {
 
 	prev := currentSession
 	currentSession = next
+	syncQ1ControlLED(next)
 	cancelKeyboardMacro()
 	if prev == nil {
 		return
@@ -72,4 +73,5 @@ func endSessionInput(s *Session) {
 	cancelKeyboardMacro()
 	releaseHeldInput()
 	currentSession = nil
+	syncQ1ControlLED(nil)
 }

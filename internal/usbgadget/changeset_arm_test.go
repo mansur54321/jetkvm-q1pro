@@ -100,7 +100,7 @@ func TestUsbGadgetUDCNotBoundAfterReportDescrChanged(t *testing.T) {
 	oldAbsoluteMouseConfig.reportDesc = oldAbsoluteMouseCombinedReportDesc
 	altGadgetConfig["absolute_mouse"] = oldAbsoluteMouseConfig
 
-	usbGadget = newUsbGadget(usbGadgetName, altGadgetConfig, usbDevices, usbConfig, nil)
+	usbGadget = newUsbGadget(usbGadgetName, "", altGadgetConfig, usbDevices, usbConfig, nil)
 	assert.NotNil(usbGadget)
 
 	udcs := getUdcs()

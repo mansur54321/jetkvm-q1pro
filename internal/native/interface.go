@@ -2,6 +2,7 @@ package native
 
 // NativeInterface defines the interface that both Native and NativeProxy implement
 type NativeInterface interface {
+	displayControls
 	Start() error
 	VideoSetSleepMode(enabled bool) error
 	VideoGetSleepMode() (bool, error)
@@ -16,6 +17,10 @@ type NativeInterface interface {
 	VideoStop() error
 	VideoStart() error
 	GetLVGLVersion() (string, error)
+	DoNotUseThisIsForCrashTestingOnly()
+}
+
+type displayControls interface {
 	UIObjHide(objName string) (bool, error)
 	UIObjShow(objName string) (bool, error)
 	UISetVar(name string, value string)
@@ -34,5 +39,4 @@ type NativeInterface interface {
 	UpdateLabelAndChangeVisibility(objName string, newText string)
 	SwitchToScreenIf(screenName string, shouldSwitch []string)
 	SwitchToScreenIfDifferent(screenName string)
-	DoNotUseThisIsForCrashTestingOnly()
 }

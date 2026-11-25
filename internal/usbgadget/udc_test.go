@@ -1,6 +1,10 @@
 package usbgadget
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // Register dumps taken on an RV1106 (kernel 5.10) with the host attached.
 const (
@@ -27,5 +31,28 @@ func TestDwc3RunStop(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestRegisteredUDCMatchesDeviceTreeWithRenamedController(t *testing.T) {
+	root := t.TempDir()
+	class := filepath.Join(root, "udc")
+	node := filepath.Join(root, "firmware", "usbdrd", "usb@ffb00000")
+	if err := os.MkdirAll(node, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first-unrelated", "renamed-controller"} {
+		if err := os.MkdirAll(filepath.Join(class, name, "device"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := registeredUDCForDevice(class, node); got != "" || err != nil {
+		t.Fatalf("unregistered node matched %q, %v", got, err)
+	}
+	if err := os.Symlink(node, filepath.Join(class, "renamed-controller", "device", "of_node")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := registeredUDCForDevice(class, node); got != "renamed-controller" || err != nil {
+		t.Fatalf("wrong controller for device tree node: %q, %v", got, err)
 	}
 }

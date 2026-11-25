@@ -56,6 +56,9 @@ func (h *hidOpenTracker) wait(timeout time.Duration) error {
 }
 
 func (u *UsbGadget) openHIDFile(name string, flag int, perm os.FileMode) (*os.File, error) {
+	if u.waitingForUDC.Load() {
+		return nil, os.ErrNotExist
+	}
 	if u.hidOpenFile != nil {
 		return u.hidOpenFile(name, flag, perm)
 	}

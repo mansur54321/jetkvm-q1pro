@@ -73,9 +73,30 @@ type osServicesService struct {
 
 // initOSServices sets up OS Services before the USB gadget, which links the
 // OS Services function once its descriptors are written.
+// FunctionFS registers its filesystem on the first ffs instance in this BSP.
+// Probe an unbound gadget so checking support cannot reconfigure the host's USB connection.
+func q1FunctionFSAvailable(configfs string) error {
+	gadget, err := os.MkdirTemp(configfs, "jetkvm-ffs-probe-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(gadget)
+	instance := filepath.Join(gadget, "functions", "ffs.os_services_probe")
+	if err := os.Mkdir(instance, 0755); err != nil {
+		return err
+	}
+	return os.Remove(instance)
+}
+
 func initOSServices() {
 	if failsafeModeActive {
 		return
+	}
+	if isQ1Pro() {
+		if err := q1FunctionFSAvailable("/sys/kernel/config/usb_gadget"); err != nil {
+			osServicesLogger.Info().Err(err).Msg("OS Services unavailable: USB FunctionFS is not registered")
+			return
+		}
 	}
 	key, err := loadOSServicesKey(osServicesKeyPath)
 	if err != nil {

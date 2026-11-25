@@ -17,6 +17,13 @@ const isOtherSessionPath = (path: string) => /\/other-session\/?$/i.test(path);
 
 const useWebSocket = pkg.default ?? pkg;
 
+interface SignalingPeer {
+  pc: RTCPeerConnection;
+  remoteCandidates: (RTCIceCandidateInit | null)[];
+  remoteDescriptionApplied: boolean;
+  drainingCandidates: boolean;
+}
+
 /**
  * Removes H.265 from each video transceiver's preferred codec list so the
  * generated SDP offer does not advertise it. Called immediately before
@@ -26,7 +33,7 @@ function stripH265FromVideoTransceivers(pc: RTCPeerConnection) {
   try {
     const caps = RTCRtpReceiver.getCapabilities?.("video");
     if (!caps) return;
-    const filtered = caps.codecs.filter(c => c.mimeType !== "video/H265");
+    const filtered = caps.codecs.filter(c => c.mimeType.toLowerCase() !== "video/h265");
     if (filtered.length === caps.codecs.length) return;
 
     for (const t of pc.getTransceivers()) {
@@ -82,11 +89,12 @@ export const useWebSocketSignaling: SignalingHook = ({
   // retired: its pending callbacks (a late offer, a queued ICE candidate, a
   // connection poll) must not reach the signaling socket or the store, which
   // now belong to its replacement.
-  const activePeerRef = useRef<RTCPeerConnection | null>(null);
+  const activePeerRef = useRef<SignalingPeer | null>(null);
+  const allowLinuxHEVC = useRef(false);
   const connectionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isCurrentPeer = useCallback(
     (pc: RTCPeerConnection) =>
-      activePeerRef.current === pc &&
+      activePeerRef.current?.pc === pc &&
       pc.connectionState !== "closed" &&
       !sessionSupersededRef.current,
     [],
@@ -95,7 +103,9 @@ export const useWebSocketSignaling: SignalingHook = ({
   // socket reconnects, so the page shows progress instead of a failure.
   const retirePeer = useCallback(
     (state: RTCPeerConnectionState = "closed") => {
-      const pc = activePeerRef.current;
+      const peer = activePeerRef.current;
+      const pc = peer?.pc;
+      if (peer) peer.remoteCandidates.length = 0;
       // Invalidate ownership before close or any pending asynchronous callback.
       activePeerRef.current = null;
       if (connectionPollRef.current !== null) {
@@ -160,16 +170,45 @@ export const useWebSocketSignaling: SignalingHook = ({
     connectionFailedRef.current = connectionFailed;
   }, [connectionFailed]);
 
+  const drainRemoteCandidates = useCallback(
+    async (peer: SignalingPeer) => {
+      if (!peer.remoteDescriptionApplied || peer.drainingCandidates) return;
+      peer.drainingCandidates = true;
+      try {
+        while (
+          isCurrentPeer(peer.pc) &&
+          peer.remoteDescriptionApplied &&
+          peer.remoteCandidates.length
+        ) {
+          const candidate = peer.remoteCandidates.shift();
+          try {
+            // An omitted candidate is the WebRTC end-of-candidates marker.
+            await peer.pc.addIceCandidate(candidate ?? undefined);
+          } catch (error) {
+            if (isCurrentPeer(peer.pc))
+              console.warn("[Websocket] Failed to add ICE candidate", error);
+          }
+        }
+      } finally {
+        peer.drainingCandidates = false;
+      }
+    },
+    [isCurrentPeer],
+  );
+
   const setRemoteSessionDescription = useCallback(
     async function setRemoteSessionDescription(
-      pc: RTCPeerConnection,
+      peer: SignalingPeer,
       remoteDescription: RTCSessionDescriptionInit,
     ) {
+      const pc = peer.pc;
       setLoadingMessage(m.setting_remote_description());
 
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(remoteDescription));
         if (!isCurrentPeer(pc)) return;
+        peer.remoteDescriptionApplied = true;
+        void drainRemoteCandidates(peer);
         console.log(
           "[setRemoteSessionDescription] Remote description set successfully to: " +
             remoteDescription.sdp,
@@ -224,7 +263,7 @@ export const useWebSocketSignaling: SignalingHook = ({
       }, 1000);
       connectionPollRef.current = checkInterval;
     },
-    [cleanupAndStopReconnecting, isCurrentPeer],
+    [cleanupAndStopReconnecting, drainRemoteCandidates, isCurrentPeer],
   );
 
   const ignoreOffer = useRef(false);
@@ -331,14 +370,16 @@ export const useWebSocketSignaling: SignalingHook = ({
 
         if (parsedMessage.type === "device-metadata") {
           const { deviceVersion } = parsedMessage.data;
+          allowLinuxHEVC.current = parsedMessage.data.allowLinuxHEVC === true;
           console.debug("[Websocket] Received device-metadata message");
           console.debug("[Websocket] Device version", deviceVersion);
 
           setupPeerConnection();
         }
 
-        const peerConnection = activePeerRef.current;
-        if (!peerConnection || !isCurrentPeer(peerConnection)) return;
+        const peer = activePeerRef.current;
+        if (!peer || !isCurrentPeer(peer.pc)) return;
+        const peerConnection = peer.pc;
 
         if (parsedMessage.type === "answer") {
           console.debug("[Websocket] Received answer");
@@ -362,21 +403,14 @@ export const useWebSocketSignaling: SignalingHook = ({
           const sd = atob(parsedMessage.data);
           const remoteSessionDescription = JSON.parse(sd);
 
-          setRemoteSessionDescription(
-            peerConnection,
-            new RTCSessionDescription(remoteSessionDescription),
-          );
+          void setRemoteSessionDescription(peer, remoteSessionDescription);
 
           // Reset the remote answer pending flag
           isSettingRemoteAnswerPending.current = false;
         } else if (parsedMessage.type === "new-ice-candidate") {
           console.debug("[Websocket] Received new-ice-candidate");
-          const candidate = parsedMessage.data;
-          void peerConnection.addIceCandidate(candidate).catch(error => {
-            if (isCurrentPeer(peerConnection)) {
-              console.warn("[Websocket] Failed to add ICE candidate", error);
-            }
-          });
+          peer.remoteCandidates.push(parsedMessage.data ?? null);
+          void drainRemoteCandidates(peer);
         }
       },
     },
@@ -435,7 +469,13 @@ export const useWebSocketSignaling: SignalingHook = ({
       cleanupAndStopReconnecting();
       return;
     }
-    activePeerRef.current = pc;
+    const peer: SignalingPeer = {
+      pc,
+      remoteCandidates: [],
+      remoteDescriptionApplied: false,
+      drainingCandidates: false,
+    };
+    activePeerRef.current = peer;
 
     // Set up event listeners and data channels
     pc.onconnectionstatechange = () => {
@@ -448,9 +488,10 @@ export const useWebSocketSignaling: SignalingHook = ({
       if (!isCurrentPeer(pc)) return;
       try {
         console.debug("[setupPeerConnection] Creating offer");
+        peer.remoteDescriptionApplied = false;
         makingOffer.current = true;
 
-        if (isLinuxDesktop()) {
+        if (isLinuxDesktop() && !allowLinuxHEVC.current) {
           stripH265FromVideoTransceivers(pc);
         }
 

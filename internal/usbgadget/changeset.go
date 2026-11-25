@@ -103,10 +103,13 @@ type ChangeSet struct {
 }
 
 type RequestedFileChange struct {
-	Component       string
-	Key             string
-	Path            string // will be used as Key if Key is empty
-	ParamSymlinks   []symlink
+	Component     string
+	Key           string
+	Path          string // will be used as Key if Key is empty
+	ParamSymlinks []symlink
+
+	detectConfigFSOrder bool
+
 	ExpectedState   FileState
 	ExpectedContent []byte
 	DependsOn       []string

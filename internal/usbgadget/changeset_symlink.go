@@ -63,7 +63,23 @@ func checkIfSymlinksInOrder(fc *FileChange, logger *zerolog.Logger) (FileState, 
 	if err != nil {
 		return FileStateUnknown, fmt.Errorf("failed to read directory")
 	}
-	slices.Reverse(files)
+	newestFirst := true
+	if fc.detectConfigFSOrder {
+		// The strings group predates every function link. Its position
+		// distinguishes the two directory orders used by Linux configfs.
+		for _, entry := range files {
+			if entry.Type()&os.ModeSymlink != 0 {
+				break
+			}
+			if entry.Name() == "strings" {
+				newestFirst = false
+				break
+			}
+		}
+	}
+	if newestFirst {
+		slices.Reverse(files)
+	}
 
 	symlinks := make([]symlink, 0)
 

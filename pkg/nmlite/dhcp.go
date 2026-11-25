@@ -167,6 +167,11 @@ func (dc *DHCPClient) Stop() error {
 
 	dc.logger.Info().Msg("stopping DHCP client")
 
+	if dc.clientType == "jetdhcpc" {
+		if err := dc.client.Stop(); err != nil {
+			return err
+		}
+	}
 	dc.client = nil
 	dc.logger.Info().Msg("DHCP client stopped")
 	return nil

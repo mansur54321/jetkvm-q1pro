@@ -30,6 +30,7 @@ func initNative(systemVersion *semver.Version, appVersion *semver.Version) {
 		AppVersion:           appVersion,
 		DisplayRotation:      config.GetDisplayRotation(),
 		DefaultQualityFactor: config.VideoQualityFactor,
+		RetryVideoInit:       isQ1Pro(),
 		MaxRestartAttempts:   config.NativeMaxRestart,
 		OnNativeRestart: func() {
 			configureDisplayOnNativeRestart()

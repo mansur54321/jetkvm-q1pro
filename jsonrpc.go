@@ -105,7 +105,7 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 	err := json.Unmarshal(message.Data, &request)
 	if err != nil {
 		jsonRpcLogger.Warn().
-			Str("data", string(message.Data)).
+			Int("length", len(message.Data)).
 			Err(err).
 			Msg("Error unmarshalling JSONRPC request")
 
@@ -121,10 +121,11 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 		return
 	}
 
-	scopedLogger := jsonRpcLogger.With().
-		Str("method", request.Method).
-		Interface("params", request.Params).
-		Interface("id", request.ID).Logger()
+	requestLog := jsonRpcLogger.With().Str("method", request.Method).Interface("id", request.ID)
+	if request.Method != "saveWifiNetwork" && request.Method != "importQ1WireGuard" {
+		requestLog = requestLog.Interface("params", request.Params)
+	}
+	scopedLogger := requestLog.Logger()
 
 	scopedLogger.Trace().Msg("Received RPC request")
 	t := time.Now()
@@ -241,6 +242,9 @@ func rpcGetAutoUpdateState() (bool, error) {
 }
 
 func rpcSetAutoUpdateState(enabled bool) (bool, error) {
+	if enabled && isQ1Pro() {
+		return false, fmt.Errorf("Q1 Pro requires a board-specific firmware image")
+	}
 	config.AutoUpdateEnabled = enabled
 	if err := SaveConfig(); err != nil {
 		return config.AutoUpdateEnabled, fmt.Errorf("failed to save config: %w", err)
@@ -249,6 +253,9 @@ func rpcSetAutoUpdateState(enabled bool) (bool, error) {
 }
 
 func rpcGetEDID() (string, error) {
+	if isQ1Pro() {
+		return "", errFixedEDID
+	}
 	if !isHostDisplayAdvertised() {
 		return configuredVideoEDID(), nil
 	}
@@ -261,6 +268,9 @@ func rpcGetEDID() (string, error) {
 }
 
 func rpcSetEDID(edid string) error {
+	if isQ1Pro() {
+		return errFixedEDID
+	}
 	if isInternalDisabledEDID(edid) {
 		return fmt.Errorf("invalid EDID")
 	}
@@ -293,10 +303,13 @@ type rpcHostDisplayIdleModeResponse struct {
 }
 
 func rpcGetHostDisplayIdleMode() rpcHostDisplayIdleModeResponse {
-	return rpcHostDisplayIdleModeResponse{Enabled: config.HideDisplayWhenIdle}
+	return rpcHostDisplayIdleModeResponse{Enabled: !isQ1Pro() && config.HideDisplayWhenIdle}
 }
 
 func rpcSetHostDisplayIdleMode(enabled bool) error {
+	if isQ1Pro() && enabled {
+		return errFixedEDID
+	}
 	previous := config.HideDisplayWhenIdle
 	if previous == enabled {
 		return nil
@@ -402,7 +415,7 @@ func rpcGetAudioConfig() (*AudioConfig, error) {
 
 func rpcSetAudioConfig(params AudioConfig) error {
 	enabled := params.Enabled
-	if enabled && (config.UsbDevices == nil || !config.UsbDevices.Audio) {
+	if enabled && !config.hasAudioInput() {
 		enabled = false
 	}
 	if config.AudioEnabled == enabled {
@@ -446,13 +459,21 @@ type SSHKeyState struct {
 // storage (startStorageDownload); the mount page hides the control without it.
 func rpcGetDeviceCapabilities() ([]string, error) {
 	capabilities := []string{
-		"shell", "extensions", "usb_serial", "custom_edid", "upload_channel", "video_during_update",
+		"shell", "usb_serial", "upload_channel",
 		"http_proxy", "domain", "mdns", "ipv6",
 		"tls", "local_loopback", "log_level", "tailscale",
 		"storage_download",
 	}
 	if osServices != nil {
 		capabilities = append(capabilities, "os_services")
+	}
+	if isQ1Pro() {
+		capabilities = append(capabilities, "displayport_audio", "wifi", "bluetooth_wifi", "fixed_edid", "manual_hevc", "wireguard")
+		if storageDownloadOnly() {
+			capabilities = append(capabilities, "storage_download_only")
+		}
+	} else {
+		capabilities = append(capabilities, "extensions", "custom_edid", "video_during_update")
 	}
 	return capabilities, nil
 }
@@ -1082,11 +1103,14 @@ func updateUsbRelatedConfig() error {
 }
 
 func rpcSetUsbDevices(usbDevices usbgadget.Devices) error {
+	if isQ1Pro() && usbDevices.Audio {
+		return fmt.Errorf("Q1 Pro captures DisplayPort audio directly")
+	}
 	osServicesNoteKVMRestart()
-	if !usbDevices.Audio {
+	config.UsbDevices = &usbDevices
+	if !config.hasAudioInput() {
 		config.AudioEnabled = false
 	}
-	config.UsbDevices = &usbDevices
 	if !effectiveAudioEnabled() {
 		stopAudio()
 	}
@@ -1108,8 +1132,11 @@ func rpcSetUsbDeviceState(device string, enabled bool) error {
 	case "serialConsole":
 		config.UsbDevices.SerialConsole = enabled
 	case "audio":
+		if enabled && isQ1Pro() {
+			return fmt.Errorf("Q1 Pro captures DisplayPort audio directly")
+		}
 		config.UsbDevices.Audio = enabled
-		if !enabled {
+		if !config.hasAudioInput() {
 			config.AudioEnabled = false
 		}
 	default:
@@ -1625,6 +1652,11 @@ var rpcHandlers = map[string]RPCHandler{
 	"emitTestLog":                {Func: rpcEmitTestLog, Params: []string{"level"}},
 	"getPublicIPAddresses":       {Func: rpcGetPublicIPAddresses, Params: []string{"refresh"}},
 	"checkPublicIPAddresses":     {Func: rpcCheckPublicIPAddresses},
+	"importQ1WireGuard":          {Func: rpcImportQ1WireGuard, Params: []string{"profile"}},
+	"getQ1WireGuard":             {Func: rpcGetQ1WireGuard},
+	"setQ1WireGuard":             {Func: rpcSetQ1WireGuard, Params: []string{"settings"}},
+	"beginQ1TailscaleLogin":      {Func: rpcBeginQ1TailscaleLogin},
+	"setQ1TailscaleEnabled":      {Func: rpcSetQ1TailscaleEnabled, Params: []string{"enabled"}},
 	"getTailscaleStatus":         {Func: rpcGetTailscaleStatus},
 	"getTailscaleControlURL":     {Func: rpcGetTailscaleControlURL},
 	"setTailscaleControlURL":     {Func: rpcSetTailscaleControlURL, Params: []string{"controlURL"}},

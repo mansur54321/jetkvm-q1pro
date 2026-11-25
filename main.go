@@ -46,10 +46,25 @@ func Main() {
 	}
 
 	LoadConfig()
+	if isQ1Pro() {
+		syncQ1ControlLED(nil)
+		if q1Tailscale.Enabled() {
+			control := config.TailscaleControlURL
+			go func() {
+				if err := q1Tailscale.Resume(control); err != nil {
+					tailscaleLogger.Warn().Err(err).Msg("Unable to start the Q1 Tailscale add-on")
+				}
+			}()
+		}
+		defer q1Tailscale.Stop()
+	}
 
 	var cancel context.CancelFunc
 	appCtx, cancel = context.WithCancel(context.Background())
 	defer cancel()
+	if isQ1Pro() {
+		registerQ1Wifi(appCtx)
+	}
 
 	systemVersionLocal, appVersionLocal, err := GetLocalVersion()
 	if err != nil {

@@ -94,15 +94,16 @@ func (im *InterfaceManager) updateInterfaceState() error {
 	}
 
 	im.state.LastUpdated = time.Now()
+	snapshot := *im.state
 	im.stateMu.Unlock()
 
 	// Notify callback if state changed
 	if stateChanged && im.onStateChange != nil {
 		im.logger.Debug().
 			Stringer("changeReasons", changeReasons).
-			Interface("state", im.state).
+			Interface("state", snapshot).
 			Msg("notifying state change")
-		im.onStateChange(*im.state)
+		im.onStateChange(snapshot)
 	}
 
 	return nil
@@ -129,8 +130,11 @@ func (im *InterfaceManager) updateInterfaceStateAddresses(nl *link.Link) (bool, 
 	)
 
 	routes, _ := mgr.ListDefaultRoutes(link.AfInet6)
-	if len(routes) > 0 {
-		ipv6Gateway = routes[0].Gw.String()
+	for _, route := range routes {
+		if route.LinkIndex == nl.Attrs().Index {
+			ipv6Gateway = route.Gw.String()
+			break
+		}
 	}
 
 	for _, addr := range addrs {

@@ -214,6 +214,9 @@ func setupRouter() *gin.Engine {
 		protected.PUT("/auth/password-local", handleUpdatePassword)
 		protected.DELETE("/auth/local-password", handleDeletePassword)
 		protected.POST("/storage/upload", handleUploadHttp)
+		if isQ1Pro() {
+			protected.POST("/device/tailscale-addon", handleQ1TailscaleInstall)
+		}
 
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
 
@@ -278,7 +281,11 @@ func handleLocalWebRTCSignal(c *gin.Context) {
 	// Now use conn for websocket operations
 	defer wsCon.Close(websocket.StatusNormalClosure, "")
 
-	err = wsjson.Write(context.Background(), wsCon, gin.H{"type": "device-metadata", "data": gin.H{"deviceVersion": builtAppVersion}})
+	metadata := gin.H{"deviceVersion": builtAppVersion}
+	if isQ1Pro() && config.VideoCodecPreference == "h265" {
+		metadata["allowLinuxHEVC"] = true
+	}
+	err = wsjson.Write(context.Background(), wsCon, gin.H{"type": "device-metadata", "data": metadata})
 	if err != nil {
 		scopedLogger.Warn().Err(err).Msg("failed to write device metadata")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send device metadata"})
@@ -287,7 +294,11 @@ func handleLocalWebRTCSignal(c *gin.Context) {
 
 	localAuthToken, _ := c.Cookie("authToken")
 	externalIP := externalIPFromHost(c.Request.Host, ownIPAddrs())
-	err = handleWebRTCSignalWsMessages(wsCon, false, source, connectionID, localAuthToken, externalIP, &scopedLogger)
+	signalCtx := c.Request.Context()
+	if isQ1Pro() {
+		signalCtx = q1Tailscale.SignalingContext(signalCtx, c.Request.RemoteAddr, c.Request.Host)
+	}
+	err = handleWebRTCSignalWsMessages(signalCtx, wsCon, false, source, connectionID, localAuthToken, externalIP, &scopedLogger)
 	if err != nil {
 		scopedLogger.Warn().Err(err).Msg("websocket session ended with error")
 	}
@@ -323,6 +334,7 @@ func externalIPFromHost(host string, ownAddrs []netip.Addr) string {
 }
 
 func handleWebRTCSignalWsMessages(
+	parent context.Context,
 	wsCon *websocket.Conn,
 	isCloudConnection bool,
 	source string,
@@ -331,7 +343,7 @@ func handleWebRTCSignalWsMessages(
 	localExternalIP string,
 	scopedLogger *zerolog.Logger,
 ) error {
-	runCtx, cancelRun := context.WithCancel(context.Background())
+	runCtx, cancelRun := context.WithCancel(parent)
 	defer func() {
 		if isCloudConnection {
 			setCloudConnectionState(CloudConnectionStateDisconnected)
@@ -695,6 +707,9 @@ const webReadHeaderTimeout = 10 * time.Second
 
 func RunWebServer() {
 	r := setupRouter()
+	if isQ1Pro() && !config.LocalLoopbackOnly {
+		go q1WireGuard.Run(appCtx, r.Handler())
+	}
 	go runLocalAuthExpirySweeper()
 
 	// Determine the binding address based on the config
@@ -907,6 +922,8 @@ func handleCloudState(c *gin.Context) {
 }
 
 func handleSetup(c *gin.Context) {
+	configLock.Lock()
+	defer configLock.Unlock()
 	// Check if the device is already set up
 	if config.LocalAuthMode != "" || config.HashedPassword != "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Device is already set up"})
@@ -937,7 +954,10 @@ func handleSetup(c *gin.Context) {
 		return
 	}
 
-	config.LocalAuthMode = req.LocalAuthMode
+	candidate := *config
+	candidate.LocalAuthMode = req.LocalAuthMode
+	candidate.LocalAuthToken = ""
+	candidate.HashedPassword = ""
 
 	if req.LocalAuthMode == "password" {
 		if req.Password == "" {
@@ -964,22 +984,19 @@ func handleSetup(c *gin.Context) {
 			return
 		}
 
-		config.HashedPassword = string(hashedPassword)
-		token := uuid.New().String()
-		setLocalAuthToken(token)
-
-		// Set the cookie
-		c.SetCookie("authToken", token, authTokenMaxAge, "/", "", false, true)
-	} else {
-		// For noPassword mode, ensure the password field is empty
-		config.HashedPassword = ""
-		setLocalAuthToken("")
+		candidate.HashedPassword = string(hashedPassword)
+		candidate.LocalAuthToken = uuid.New().String()
 	}
 
-	err := SaveConfig()
-	if err != nil {
+	if err := writeConfigFile(configPath, &candidate); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save config"})
 		return
+	}
+	config.HashedPassword = candidate.HashedPassword
+	setLocalAuthToken(candidate.LocalAuthToken)
+	config.LocalAuthMode = candidate.LocalAuthMode
+	if candidate.LocalAuthToken != "" {
+		c.SetCookie("authToken", candidate.LocalAuthToken, authTokenMaxAge, "/", "", false, true)
 	}
 
 	updateMdnsTXT()

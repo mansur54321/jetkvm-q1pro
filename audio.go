@@ -90,6 +90,8 @@ func runAudioCapture(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 
 	sample := media.Sample{Duration: 20 * time.Millisecond}
 	lastPacket := time.Now()
+	lastPeriod := lastPacket
+	displayPort := isQ1Pro()
 	consecutiveErrors := 0
 
 	for {
@@ -101,6 +103,11 @@ func runAudioCapture(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 
 		payload, err := capture.ReadEncoded(codec)
 		if err != nil {
+			if errors.Is(err, audio.ErrNoAudioData) && displayPort && time.Since(lastPeriod) > 4*time.Second {
+				// A lost DP audio clock can leave the PCM open without an XRUN.
+				err = errors.New("no DisplayPort capture periods for four seconds")
+				consecutiveErrors = reopenThreshold - 1
+			}
 			if errors.Is(err, audio.ErrNoAudioData) {
 				// Partial period or idle ALSA — back off ~half a frame so we
 				// don't spin while the buffer fills.
@@ -120,6 +127,7 @@ func runAudioCapture(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 					return
 				}
 				capture = next
+				lastPeriod = time.Now()
 				consecutiveErrors = 0
 				continue
 			}
@@ -133,6 +141,7 @@ func runAudioCapture(ctx context.Context, track *webrtc.TrackLocalStaticSample, 
 		}
 
 		now := time.Now()
+		lastPeriod = now
 		if gap := rtpclock.SilenceGap(now.Sub(lastPacket), sample.Duration); gap > 0 {
 			if err := track.WriteSample(media.Sample{Duration: gap}); err != nil {
 				audioLogger.Warn().Err(err).Msg("audio clock step failed")
@@ -173,8 +182,10 @@ func openCaptureWithBackoff(ctx context.Context) (*audio.ALSACapture, error) {
 	}
 }
 
-// alsaCaptureDevice returns the ALSA device for the UAC1 gadget card.
 func alsaCaptureDevice() string {
+	if isQ1Pro() {
+		return "hw:CARD=rockchipdpin,DEV=0"
+	}
 	if card, ok := findALSACard("UAC1Gadget"); ok {
 		return "hw:" + strconv.Itoa(card) + ",0"
 	}

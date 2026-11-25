@@ -18,3 +18,12 @@ ui/reports
 
 # compiled remote-agent test binary
 e2e/remote-agent/remote-agent
+
+# Local Q1 Pro build inputs, backups and generated firmware
+/q1-build-inputs/
+/q1-backup/
+/q1-install/
+/owner-key.pem
+/owner-key.pub
+/new.tar
+/previous.tar

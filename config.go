@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -185,7 +186,7 @@ var (
 )
 
 func getDefaultConfig() Config {
-	return Config{
+	cfg := Config{
 		CloudURL:             DefaultAPIURL,
 		UpdateAPIURL:         DefaultAPIURL,
 		CloudAppURL:          "https://app.jetkvm.com",
@@ -221,6 +222,19 @@ func getDefaultConfig() Config {
 			DebounceMs:        500,
 		},
 	}
+	if isQ1Pro() {
+		cfg.UsbDevices.Audio = false
+		cfg.AutoUpdateEnabled = false
+		cfg.NetworkConfig.DHCPClient.SetValid("jetdhcpc")
+		cfg.NetworkConfig.TimeSyncMode.SetValid("ntp_only")
+		cfg.NetworkConfig.TimeSyncOrdering = []string{"ntp_dhcp"}
+		cfg.NetworkConfig.TimeSyncDisableFallback.SetValid(true)
+	}
+	return cfg
+}
+
+func (c *Config) hasAudioInput() bool {
+	return isQ1Pro() || (c.UsbDevices != nil && c.UsbDevices.Audio)
 }
 
 var (
@@ -288,10 +302,14 @@ func LoadConfig() {
 	if loadedConfig.UsbDevices == nil {
 		loadedConfig.UsbDevices = getDefaultConfig().UsbDevices
 	} else if !usbDevicesConfigHasAudio(rawConfig) {
-		loadedConfig.UsbDevices.Audio = defaultUsbDevices.Audio
+		loadedConfig.UsbDevices.Audio = getDefaultConfig().UsbDevices.Audio
 	}
 
-	if !loadedConfig.UsbDevices.Audio {
+	if isQ1Pro() {
+		loadedConfig.UsbDevices.Audio = false
+		loadedConfig.AutoUpdateEnabled = false
+	}
+	if !loadedConfig.hasAudioInput() {
 		loadedConfig.AudioEnabled = false
 	}
 
@@ -370,27 +388,62 @@ func saveConfig(path string) error {
 	configLock.Lock()
 	defer configLock.Unlock()
 
+	return writeConfigFile(path, config)
+}
+
+func writeConfigFile(path string, cfg *Config) error {
 	logger.Trace().Str("path", path).Msg("Saving config")
 
 	// fixup old keyboard layout value
-	if config.KeyboardLayout == "en_US" {
-		config.KeyboardLayout = "en-US"
+	if cfg.KeyboardLayout == "en_US" {
+		cfg.KeyboardLayout = "en-US"
 	}
 
-	file, err := os.Create(path)
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("failed to resolve config link: %w", err)
+		}
+		path = target
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	file, err := os.CreateTemp(filepath.Dir(path), ".kvm_config-*")
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
+	defer os.Remove(file.Name())
 	defer file.Close()
+	if info, err := os.Stat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("config is not a regular file: %s", path)
+		}
+		if err := file.Chmod(info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(config); err != nil {
+	if err := encoder.Encode(cfg); err != nil {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
 
 	if err := file.Sync(); err != nil {
-		return fmt.Errorf("failed to wite config: %w", err)
+		return fmt.Errorf("failed to sync config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		return fmt.Errorf("failed to replace config: %w", err)
+	}
+	if err := dir.Sync(); err != nil {
+		// The rename has committed; the new file is already visible to readers.
+		logger.Warn().Err(err).Str("path", path).Msg("config saved, directory sync failed")
 	}
 
 	logger.Info().Str("path", path).Msg("config saved")

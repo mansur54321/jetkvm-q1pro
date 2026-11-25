@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/guregu/null/v6"
 	"github.com/jetkvm/kvm/internal/confparser"
 	"github.com/jetkvm/kvm/internal/network/types"
 	"github.com/jetkvm/kvm/internal/ota"
@@ -27,6 +28,7 @@ var (
 
 type RpcNetworkSettings struct {
 	types.NetworkConfig
+	FixedDHCPClient bool `json:"fixed_dhcp_client,omitempty"`
 }
 
 func (s *RpcNetworkSettings) ToNetworkConfig() *types.NetworkConfig {
@@ -40,7 +42,8 @@ type PostRebootAction struct {
 
 func toRpcNetworkSettings(config *types.NetworkConfig) *RpcNetworkSettings {
 	return &RpcNetworkSettings{
-		NetworkConfig: *config,
+		NetworkConfig:   *config,
+		FixedDHCPClient: isQ1Pro(),
 	}
 }
 
@@ -66,10 +69,7 @@ func triggerTimeSyncOnNetworkStateChange() {
 
 	// set the NTP servers from the network manager
 	if networkManager != nil {
-		ntpServers := make([]string, len(networkManager.NTPServers()))
-		for i, server := range networkManager.NTPServers() {
-			ntpServers[i] = server.String()
-		}
+		ntpServers := networkManager.NTPServerStrings()
 		networkLogger.Info().Strs("ntpServers", ntpServers).Msg("setting NTP servers from network manager")
 		timeSync.SetDhcpNtpAddresses(ntpServers)
 	}
@@ -94,7 +94,7 @@ func networkStateChanged(_ string, state types.InterfaceState) {
 	go waitCtrlAndRequestDisplayUpdate(false, "network_state_changed")
 
 	if currentSession != nil {
-		writeJSONRPCEvent("networkState", state.ToRpcInterfaceState(), currentSession)
+		writeJSONRPCEvent("networkState", rpcGetNetworkState(), currentSession)
 	}
 
 	if state.Online {
@@ -102,7 +102,7 @@ func networkStateChanged(_ string, state types.InterfaceState) {
 		triggerTimeSyncOnNetworkStateChange()
 	}
 
-	setPublicIPReadyState(state.IPv4Ready, state.IPv6Ready)
+	setPublicIPReadyState(networkManager.IPv4Ready(), networkManager.IPv6Ready())
 
 	// always restart mDNS when the network state changes
 	if mDNS != nil {
@@ -136,17 +136,30 @@ func initNetwork() error {
 	validateNetworkConfig()
 
 	nc := config.NetworkConfig
+	if isQ1Pro() {
+		nc.DHCPClient = null.StringFrom("jetdhcpc")
+	}
 
 	nm := nmlite.NewNetworkManager(context.Background(), networkLogger)
 	networkLogger.Info().Interface("networkConfig", nc).Str("hostname", nc.Hostname.String).Str("domain", nc.Domain.String).Msg("initializing network manager")
 	_ = setHostname(nm, nc.Hostname.String, nc.Domain.String)
+	networkManager = nm
 	nm.SetOnInterfaceStateChange(networkStateChanged)
+	if isQ1Pro() {
+		if err := nm.WatchInterface(NetIfName, nc, 100); err != nil {
+			return err
+		}
+		wifi := &types.NetworkConfig{DHCPClient: null.StringFrom("jetdhcpc")}
+		if err := nm.WatchInterface("wlan0", wifi, 600); err != nil {
+			_ = nm.Stop()
+			return err
+		}
+		return nil
+	}
 	if err := nm.AddInterface(NetIfName, nc); err != nil {
 		return fmt.Errorf("failed to add interface: %w", err)
 	}
 	_ = nm.CleanUpLegacyDHCPClients()
-
-	networkManager = nm
 
 	return nil
 }
@@ -264,8 +277,7 @@ func shouldRebootForNetworkChange(oldConfig, newConfig *types.NetworkConfig) (re
 }
 
 func rpcGetNetworkState() *types.RpcInterfaceState {
-	state, _ := networkManager.GetInterfaceState(NetIfName)
-	return state.ToRpcInterfaceState()
+	return networkManager.PrimaryState().ToRpcInterfaceState()
 }
 
 func rpcGetNetworkSettings() *RpcNetworkSettings {
@@ -274,6 +286,12 @@ func rpcGetNetworkSettings() *RpcNetworkSettings {
 
 func rpcSetNetworkSettings(settings RpcNetworkSettings) (*RpcNetworkSettings, error) {
 	netConfig := settings.ToNetworkConfig()
+	if isQ1Pro() {
+		if netConfig.DHCPClient.Valid && netConfig.DHCPClient.String != "jetdhcpc" {
+			return nil, fmt.Errorf("Q1 Pro requires the built-in jetdhcpc client")
+		}
+		netConfig.DHCPClient = null.StringFrom("jetdhcpc")
+	}
 
 	l := networkLogger.With().
 		Str("interface", NetIfName).
@@ -283,7 +301,17 @@ func rpcSetNetworkSettings(settings RpcNetworkSettings) (*RpcNetworkSettings, er
 	l.Debug().Msg("setting new config")
 
 	// Check if reboot is needed
+	if err := confparser.SetDefaultsAndValidate(netConfig); err != nil {
+		return nil, err
+	}
 	rebootRequired, postRebootAction := shouldRebootForNetworkChange(config.NetworkConfig, netConfig)
+	if isQ1Pro() && rebootRequired && config.NetworkConfig.Hostname == netConfig.Hostname {
+		ethernet, err := networkManager.GetInterfaceState(NetIfName)
+		if err == nil && !ethernet.Up {
+			// The Ethernet configuration is staged until carrier. Keep the Wi-Fi session alive.
+			rebootRequired, postRebootAction = false, nil
+		}
+	}
 
 	// If reboot required, send willReboot event before applying network config
 	if rebootRequired {
@@ -330,10 +358,17 @@ func rpcSetNetworkSettings(settings RpcNetworkSettings) (*RpcNetworkSettings, er
 }
 
 func rpcRenewDHCPLease() error {
-	return networkManager.RenewDHCPLease(NetIfName)
+	iface := NetIfName
+	if isQ1Pro() {
+		iface = networkManager.PrimaryState().InterfaceName
+	}
+	return networkManager.RenewDHCPLease(iface)
 }
 
 func rpcToggleDHCPClient() error {
+	if isQ1Pro() {
+		return fmt.Errorf("Q1 Pro requires the built-in jetdhcpc client")
+	}
 	switch config.NetworkConfig.DHCPClient.String {
 	case "jetdhcpc":
 		config.NetworkConfig.DHCPClient.String = "udhcpc"

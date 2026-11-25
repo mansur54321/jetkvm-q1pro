@@ -1,0 +1,22 @@
+udc-core
+dwc3-of-simple
+dwc3
+libcomposite
+u_ether
+usb_f_ecm
+u_serial
+usb_f_acm
+usb_f_hid
+usb_f_mass_storage
+rk_dvbm
+video_rkcif
+video_rkisp
+phy-rockchip-csi2-dphy-hw
+phy-rockchip-csi2-dphy
+cec
+rockchip-hdmirx-class
+video-rk628
+rk628-csi
+rga3
+mpp_vcodec
+rockit mcu_fw_path=/lib/firmware/hpmcu_wrap.bin mcu_fw_addr=0xff6fe000

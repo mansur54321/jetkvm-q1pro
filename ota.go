@@ -17,9 +17,15 @@ var builtAppVersion = "0.1.0+dev"
 var otaState *ota.State
 
 func initOta() {
+	// The Q1 Pro has a single UBI root volume. rk_ota manages the JetKVM A/B layout.
+	endpoint := config.GetUpdateAPIURL()
+	if isQ1Pro() {
+		endpoint = ""
+	}
 	otaState = ota.NewState(ota.Options{
 		Logger:             otaLogger,
-		ReleaseAPIEndpoint: config.GetUpdateAPIURL(),
+		ReleaseAPIEndpoint: endpoint,
+		SkipConfirmSystem:  isQ1Pro(),
 		GetHTTPClient: func() ota.HttpClient {
 			transport := http.DefaultTransport.(*http.Transport).Clone()
 			transport.Proxy = config.NetworkConfig.GetTransportProxyFunc()
@@ -183,6 +189,9 @@ func rpcCheckUpdateComponents(params updateParams, includePreRelease bool) (*ota
 }
 
 func rpcTryUpdateComponents(params updateParams, includePreRelease bool, resetConfig bool) error {
+	if isQ1Pro() {
+		return fmt.Errorf("Q1 Pro requires a board-specific firmware image")
+	}
 	updateParams := ota.UpdateParams{
 		DeviceID:          GetDeviceID(),
 		SKU:               GetDeviceSKU(),

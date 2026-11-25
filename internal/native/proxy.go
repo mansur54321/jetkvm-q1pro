@@ -35,6 +35,7 @@ type nativeProxyOptions struct {
 	AppVersion            *semver.Version `env:"JETKVM_NATIVE_APP_VERSION"`
 	DisplayRotation       uint16          `env:"JETKVM_NATIVE_DISPLAY_ROTATION"`
 	DefaultQualityFactor  float64         `env:"JETKVM_NATIVE_DEFAULT_QUALITY_FACTOR"`
+	RetryVideoInit        bool            `env:"JETKVM_NATIVE_RETRY_VIDEO_INIT"`
 	CtrlUnixSocket        string          `env:"JETKVM_NATIVE_CTRL_UNIX_SOCKET"`
 	VideoStreamUnixSocket string          `env:"JETKVM_NATIVE_VIDEO_STREAM_UNIX_SOCKET"`
 	BinaryPath            string          `env:"JETKVM_NATIVE_BINARY_PATH"`
@@ -72,6 +73,7 @@ func (n *NativeOptions) toProxyOptions() *nativeProxyOptions {
 		AppVersion:           n.AppVersion,
 		DisplayRotation:      n.DisplayRotation,
 		DefaultQualityFactor: n.DefaultQualityFactor,
+		RetryVideoInit:       n.RetryVideoInit,
 		OnVideoFrameReceived: n.OnVideoFrameReceived,
 		OnIndevEvent:         n.OnIndevEvent,
 		OnRpcEvent:           n.OnRpcEvent,
@@ -89,6 +91,7 @@ func (p *nativeProxyOptions) toNativeOptions() *NativeOptions {
 		AppVersion:           p.AppVersion,
 		DisplayRotation:      p.DisplayRotation,
 		DefaultQualityFactor: p.DefaultQualityFactor,
+		RetryVideoInit:       p.RetryVideoInit,
 	}
 }
 

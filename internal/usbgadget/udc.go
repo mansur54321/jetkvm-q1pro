@@ -1,11 +1,13 @@
 package usbgadget
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +27,86 @@ func getUdcs() []string {
 	}
 
 	return udcs
+}
+
+func registeredUDCForDevice(classDir, device string) (string, error) {
+	target, err := os.Stat(device)
+	if err != nil {
+		return "", err
+	}
+	controllers, err := os.ReadDir(classDir)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range controllers {
+		parent := path.Join(classDir, entry.Name(), "device")
+		for _, attr := range []string{parent, path.Join(parent, "of_node")} {
+			info, err := os.Stat(attr)
+			if err == nil && os.SameFile(target, info) {
+				return entry.Name(), nil
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return "", err
+			}
+		}
+	}
+	return "", nil
+}
+
+// AttachRegisteredUDC is polled during startup. A configfs UDC write claims a
+// free controller atomically, even if another gadget binds after our read.
+func (u *UsbGadget) AttachRegisteredUDC() (bool, error) {
+	if !u.waitingForUDC.Load() {
+		return true, nil
+	}
+	u.configLock.Lock()
+	defer u.configLock.Unlock()
+	if !u.waitingForUDC.Load() {
+		return true, nil
+	}
+	if u.attachDisabled {
+		return false, nil
+	}
+	name, err := registeredUDCForDevice(udcClassPath, u.controllerDevice)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && name == "") {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	function, err := os.ReadFile(path.Join(udcClassPath, name, "function"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	owner := strings.TrimSpace(string(function))
+	if owner != "" && owner != u.name {
+		return false, nil
+	}
+	bound, err := os.ReadFile(path.Join(u.kvmGadgetPath, "UDC"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if other := strings.TrimSpace(string(bound)); other != "" && other != name {
+		return false, fmt.Errorf("gadget %s already bound to %s", u.name, other)
+	}
+	u.udc = name
+	if owner == u.name {
+		u.syncMassStorageImageFromKernel()
+	}
+	u.hidLifecycle.Lock()
+	adopted, err := u.configureUsbGadgetLocked(false, false)
+	u.hidLifecycle.Unlock()
+	if err != nil {
+		return false, err
+	}
+	u.waitingForUDC.Store(false)
+	if adopted {
+		u.adoptLiveGadget()
+	}
+	return true, nil
 }
 
 // hidgDevicePath is the chardev used to verify HID function health after rebind.
@@ -114,6 +196,9 @@ func (u *UsbGadget) SoftReconnect() error {
 	u.configLock.Lock()
 	defer u.configLock.Unlock()
 
+	if u.waitingForUDC.Load() {
+		return syscall.ENODEV
+	}
 	if err := softDisconnect(u.udc); err != nil {
 		return err
 	}
@@ -164,6 +249,9 @@ func (u *UsbGadget) rebindUsbWith(rebind func() error) error {
 
 // withHIDRebind requires configLock and excludes HID access during a rebind.
 func (u *UsbGadget) withHIDRebind(rebind func() error) error {
+	if u.waitingForUDC.Load() {
+		return syscall.ENODEV
+	}
 	u.hidLifecycle.Lock()
 	defer u.hidLifecycle.Unlock()
 	// An open may outlive its caller's timeout. It must return and close its
@@ -177,6 +265,9 @@ func (u *UsbGadget) withHIDRebind(rebind func() error) error {
 
 // GetUsbState returns the current state of the USB gadget
 func (u *UsbGadget) GetUsbState() (state string) {
+	if u.waitingForUDC.Load() {
+		return USBStateNotAttached
+	}
 	stateFile := path.Join(udcClassPath, u.udc, "state")
 	stateBytes, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -192,6 +283,9 @@ func (u *UsbGadget) GetUsbState() (state string) {
 
 // IsUDCBound checks if the UDC state is bound.
 func (u *UsbGadget) IsUDCBound() (bool, error) {
+	if u.waitingForUDC.Load() {
+		return false, nil
+	}
 	udcFilePath := path.Join(dwc3Path, u.udc)
 	_, err := os.Stat(udcFilePath)
 	if err != nil {
@@ -214,7 +308,13 @@ func (u *UsbGadget) IsGadgetAttachedToUDC() bool {
 // SetEmulationEnabled enables or disables USB emulation after draining HID opens
 // and closing cached handles, so no old descriptor survives the controller change.
 func (u *UsbGadget) SetEmulationEnabled(enabled bool) error {
-	return u.rebindUsbWith(func() error {
+	u.configLock.Lock()
+	defer u.configLock.Unlock()
+	if u.waitingForUDC.Load() {
+		u.attachDisabled = !enabled
+		return nil
+	}
+	return u.withHIDRebind(func() error {
 		bound, err := u.IsUDCBound()
 		if err != nil {
 			return err
@@ -233,6 +333,9 @@ func (u *UsbGadget) SetEmulationEnabled(enabled bool) error {
 
 // BindUDC binds the gadget to the UDC.
 func (u *UsbGadget) BindUDC() error {
+	if u.waitingForUDC.Load() {
+		return syscall.ENODEV
+	}
 	err := os.WriteFile(path.Join(dwc3Path, "bind"), []byte(u.udc), 0644)
 	if err != nil {
 		return fmt.Errorf("error binding UDC: %w", err)
@@ -242,6 +345,9 @@ func (u *UsbGadget) BindUDC() error {
 
 // UnbindUDC unbinds the gadget from the UDC.
 func (u *UsbGadget) UnbindUDC() error {
+	if u.waitingForUDC.Load() {
+		return syscall.ENODEV
+	}
 	_ = softDisconnect(u.udc)
 	err := os.WriteFile(path.Join(dwc3Path, "unbind"), []byte(u.udc), 0644)
 	if err != nil {

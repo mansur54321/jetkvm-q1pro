@@ -195,6 +195,18 @@ func TestDownloadLargerThanFreeSpace(t *testing.T) {
 	}
 }
 
+func TestChunkedDownloadCannotExhaustStorage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	d, _ := newDownloader(t)
+	d.FreeSpace = func() (int64, error) { return int64(len(payload) - 1), nil }
+	requireFailed(t, run(t, d, server.URL+"/test.iso", ""), ErrNoSpace)
+	requireEmptyDir(t, d.Dir)
+}
+
 func TestCancelStopsTransferAndRemovesPartial(t *testing.T) {
 	ts := httptest.NewServer(partialSender(nil))
 	defer ts.Close()

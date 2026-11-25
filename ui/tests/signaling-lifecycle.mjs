@@ -58,12 +58,27 @@ async function waitFor(predicate, message) {
   throw new Error(message);
 }
 
-async function fixture({ deferFirstOffer = false, takeoverHub } = {}) {
+async function fixture({ deferFirstOffer = false, takeoverHub, q1Codec } = {}) {
   const context = await browser.newContext();
   const sockets = [];
   const messages = [];
   await context.addInitScript(
-    ({ deferFirstOffer }) => {
+    ({ deferFirstOffer, q1Codec }) => {
+      if (q1Codec !== undefined) {
+        Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux x86_64)" });
+        const caps = RTCRtpReceiver.getCapabilities.bind(RTCRtpReceiver);
+        RTCRtpReceiver.getCapabilities = kind => {
+          const base = caps(kind);
+          if (kind !== "video" || base.codecs.some(c => c.mimeType === "video/H265")) return base;
+          return { ...base, codecs: [...base.codecs, { mimeType: "video/H265", clockRate: 90000 }] };
+        };
+        const preferences = RTCRtpTransceiver.prototype.setCodecPreferences;
+        window.codecFilters = [];
+        RTCRtpTransceiver.prototype.setCodecPreferences = function(codecs) {
+          window.codecFilters.push(codecs.map(c => c.mimeType));
+          return preferences.call(this, codecs);
+        };
+      }
       const NativePeer = window.RTCPeerConnection;
       window.probe = { peers: [], releaseOffer: null, localPending: false };
       window.RTCPeerConnection = class extends NativePeer {
@@ -82,7 +97,7 @@ async function fixture({ deferFirstOffer = false, takeoverHub } = {}) {
         }
       };
     },
-    { deferFirstOffer },
+    { deferFirstOffer, q1Codec },
   );
   const page = await context.newPage();
   const errors = [];
@@ -103,7 +118,7 @@ async function fixture({ deferFirstOffer = false, takeoverHub } = {}) {
       }
       messages.push({ socket: sockets.indexOf(socket), ...JSON.parse(raw) });
     });
-    socket.send(JSON.stringify({ type: "device-metadata", data: { deviceVersion: "1.0.0" } }));
+    socket.send(JSON.stringify({ type: "device-metadata", data: { deviceVersion: "1.0.0", allowLinuxHEVC: q1Codec === "h265" } }));
   });
   await page.goto(origin, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.probe.peers.length === 1);
@@ -125,6 +140,111 @@ async function test(name, run) {
   }
 }
 try {
+  for (const q1Codec of ["auto", "h265"]) {
+    const checkCodec = async ({ page, messages }) => {
+      await waitFor(() => messages.some(m => m.type === "offer"), "no SDP offer");
+      const filters = await page.evaluate(() => window.codecFilters);
+      if (q1Codec === "auto") {
+        assert.ok(filters.length > 0);
+        assert.ok(filters.every(list => !list.includes("video/H265")));
+      } else {
+        assert.deepEqual(filters, []);
+      }
+    };
+    checkCodec.options = { q1Codec };
+    await test("Linux HEVC policy for " + q1Codec, checkCodec);
+  }
+  // Hold both asynchronous browser operations so candidate ordering is deterministic.
+  async function observeRemoteIce(page) {
+    await page.evaluate(() => {
+      const pc = window.probe.peers.at(-1);
+      pc.received = [];
+      pc.setRemoteDescription = () =>
+        new Promise(resolve => {
+          pc.releaseAnswer = resolve;
+        });
+      pc.addIceCandidate = async candidate => {
+        pc.received.push(candidate?.candidate ?? null);
+        if (pc.received.length === 1) {
+          await new Promise(resolve => {
+            pc.releaseCandidate = resolve;
+          });
+        }
+      };
+    });
+  }
+  const sendCandidate = (socket, candidate) =>
+    socket.send(JSON.stringify({ type: "new-ice-candidate", data: candidate }));
+  const sendAnswer = socket =>
+    socket.send(
+      JSON.stringify({
+        type: "answer",
+        data: Buffer.from(JSON.stringify({ type: "answer", sdp: "" })).toString("base64"),
+      }),
+    );
+
+  await test("remote ICE waits for the answer and preserves order and end markers", async ({
+    page,
+    sockets,
+    messages,
+  }) => {
+    await waitFor(() => messages.some(m => m.type === "offer"), "offer missing");
+    await observeRemoteIce(page);
+    sendCandidate(sockets[0], { candidate: "early" });
+    sendAnswer(sockets[0]);
+    await page.waitForFunction(() => !!window.probe.peers[0].releaseAnswer);
+    assert.deepEqual(await page.evaluate(() => window.probe.peers[0].received), []);
+
+    sendCandidate(sockets[0], { candidate: "during-answer" });
+    await page.evaluate(() => window.probe.peers[0].releaseAnswer());
+    await page.waitForFunction(() => !!window.probe.peers[0].releaseCandidate);
+    sendCandidate(sockets[0], { candidate: "late" });
+    sendCandidate(sockets[0], { candidate: "", sdpMid: "0" });
+    sendCandidate(sockets[0], null);
+    await page.evaluate(() => window.probe.peers[0].releaseCandidate());
+    await page.waitForFunction(() => window.probe.peers[0].received.length === 5);
+    assert.deepEqual(await page.evaluate(() => window.probe.peers[0].received), [
+      "early",
+      "during-answer",
+      "late",
+      "",
+      null,
+    ]);
+  });
+
+  await test("retiring a peer drops its pending remote ICE", async ({
+    page,
+    sockets,
+    messages,
+  }) => {
+    await waitFor(() => messages.some(m => m.type === "offer"), "first offer missing");
+    await observeRemoteIce(page);
+    sendCandidate(sockets[0], { candidate: "first" });
+    sendCandidate(sockets[0], { candidate: "discard-on-retire" });
+    sendAnswer(sockets[0]);
+    await page.waitForFunction(() => !!window.probe.peers[0].releaseAnswer);
+    await page.evaluate(() => window.probe.peers[0].releaseAnswer());
+    await page.waitForFunction(() => !!window.probe.peers[0].releaseCandidate);
+
+    sockets[0].close({ code: 1001, reason: "replace peer" });
+    await waitFor(
+      () => messages.some(m => m.socket === 1 && m.type === "offer"),
+      "second offer missing",
+    );
+    await observeRemoteIce(page);
+    await page.evaluate(() => window.probe.peers[0].releaseCandidate());
+    sendCandidate(sockets[1], { candidate: "replacement" });
+    sendAnswer(sockets[1]);
+    await page.waitForFunction(() => !!window.probe.peers[1].releaseAnswer);
+    await page.evaluate(() => window.probe.peers[1].releaseAnswer());
+    await page.waitForFunction(() => !!window.probe.peers[1].releaseCandidate);
+    await page.evaluate(() => window.probe.peers[1].releaseCandidate());
+    assert.deepEqual(await page.evaluate(() => window.probe.peers.map(p => p.received)), [
+      ["first"],
+      ["replacement"],
+    ]);
+  });
+
   await test("signaling close retires the peer before reconnect", async ({ page, sockets }) => {
     sockets[0].close({ code: 1001, reason: "offline test disconnect" });
     await page.waitForTimeout(100);

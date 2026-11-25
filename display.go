@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jetkvm/kvm/internal/native"
 	"github.com/jetkvm/kvm/internal/sync"
 
 	"github.com/prometheus/common/version"
@@ -182,6 +183,9 @@ var (
 )
 
 func requestDisplayUpdate(shouldWakeDisplay bool, reason string) {
+	if !native.LocalDisplayEnabled() {
+		return
+	}
 	displayUpdateLock.Lock()
 	defer displayUpdateLock.Unlock()
 
@@ -241,6 +245,9 @@ func updateStaticContents() {
 // configureDisplayOnNativeRestart is called when the native process restarts
 // it ensures the display is configured correctly after the restart
 func configureDisplayOnNativeRestart() {
+	if !native.LocalDisplayEnabled() {
+		return
+	}
 	displayLogger.Info().Msg("native restarted, configuring display")
 	updateStaticContents()
 	requestDisplayUpdate(true, "native_restart")
@@ -301,6 +308,9 @@ func tick_displayOff() {
 // last woke, ready for displayTimeoutTick to put the display back in the dim/off states.
 // Set force to true to skip the backlight state check, this should be done if altering the tickers.
 func wakeDisplay(force bool, reason string) {
+	if !native.LocalDisplayEnabled() {
+		return
+	}
 	if backlightState == 0 && !force {
 		return
 	}
@@ -333,6 +343,9 @@ func wakeDisplay(force bool, reason string) {
 // if they're not already set. This is done separately to the init routine as the "never dim"
 // option has the value set to zero, but time.NewTicker only accept positive values.
 func startBacklightTickers() {
+	if !native.LocalDisplayEnabled() {
+		return
+	}
 	// Don't start the tickers if the display is switched off.
 	// Set the display to off if that's the case.
 	if config.DisplayMaxBrightness == 0 {
@@ -373,6 +386,9 @@ func startBacklightTickers() {
 }
 
 func initDisplay() {
+	if !native.LocalDisplayEnabled() {
+		return
+	}
 	go func() {
 		displayLogger.Info().Msg("setting initial display contents")
 		time.Sleep(500 * time.Millisecond)

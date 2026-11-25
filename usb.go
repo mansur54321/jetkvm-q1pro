@@ -24,34 +24,24 @@ func serialConsoleEnabled() bool {
 }
 
 func effectiveAudioEnabled() bool {
-	return config != nil &&
-		config.UsbDevices != nil &&
-		config.AudioEnabled &&
-		config.UsbDevices.Audio
+	return config != nil && config.AudioEnabled && config.hasAudioInput()
 }
 
 // initUsbGadget initializes the USB gadget.
 // call it only after the config is loaded.
 func initUsbGadget() {
-	gadget = usbgadget.NewUsbGadget(
-		"jetkvm",
-		effectiveUsbDevices(),
-		config.UsbConfig,
-		usbLogger,
-	)
+	q1 := isQ1Pro()
+	if q1 {
+		gadget = usbgadget.NewUsbGadgetForUDC("jetkvm", "/sys/firmware/devicetree/base/usbdrd/usb@ffb00000", effectiveUsbDevices(), config.UsbConfig, usbLogger)
+	} else {
+		gadget = usbgadget.NewUsbGadget("jetkvm", effectiveUsbDevices(), config.UsbConfig, usbLogger)
+	}
 
 	setUSBRecoveryTimer(time.Now())
 
 	if present, known := gadget.IsUsbHostPresent(); known {
 		lastHostOK = present
 	}
-
-	go func() {
-		for {
-			checkUSBState()
-			time.Sleep(500 * time.Millisecond)
-		}
-	}()
 
 	gadget.SetOnKeyboardStateChange(func(state usbgadget.KeyboardState) {
 		if currentSession != nil {
@@ -66,9 +56,34 @@ func initUsbGadget() {
 		}
 	})
 
-	// open the keyboard hid file to listen for keyboard events
-	if err := gadget.OpenKeyboardHidFile(); err != nil {
-		usbLogger.Error().Err(err).Msg("failed to open keyboard hid file")
+	openKeyboard := func() {
+		if err := gadget.OpenKeyboardHidFile(); err != nil {
+			usbLogger.Error().Err(err).Msg("failed to open keyboard hid file")
+		}
+	}
+	go func() {
+		if q1 {
+			for {
+				ready, err := gadget.AttachRegisteredUDC()
+				if ready {
+					break
+				}
+				if err != nil {
+					usbLogger.Warn().Err(err).Msg("could not attach USB gadget")
+					time.Sleep(5 * time.Second)
+				} else {
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
+			openKeyboard()
+		}
+		for {
+			checkUSBState()
+			time.Sleep(500 * time.Millisecond)
+		}
+	}()
+	if !q1 {
+		openKeyboard()
 	}
 }
 

@@ -15,14 +15,23 @@ const commandTimeout = 10 * time.Second
 
 const DefaultControlURL = "https://controlplane.tailscale.com"
 
+type AddonInfo struct {
+	Enabled       bool   `json:"enabled"`
+	Version       string `json:"version"`
+	ArchiveBytes  int64  `json:"archiveBytes"`
+	RequiredBytes int64  `json:"requiredBytes"`
+	FreeBytes     int64  `json:"freeBytes"`
+}
+
 type Status struct {
-	Installed    bool     `json:"installed"`
-	Running      bool     `json:"running"`
-	BackendState string   `json:"backendState,omitempty"`
-	AuthURL      string   `json:"authURL,omitempty"`
-	ControlURL   string   `json:"controlURL,omitempty"`
-	Self         *Peer    `json:"self,omitempty"`
-	Health       []string `json:"health,omitempty"`
+	Addon        *AddonInfo `json:"addon,omitempty"`
+	Installed    bool       `json:"installed"`
+	Running      bool       `json:"running"`
+	BackendState string     `json:"backendState,omitempty"`
+	AuthURL      string     `json:"authURL,omitempty"`
+	ControlURL   string     `json:"controlURL,omitempty"`
+	Self         *Peer      `json:"self,omitempty"`
+	Health       []string   `json:"health,omitempty"`
 }
 
 type Peer struct {

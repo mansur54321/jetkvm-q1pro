@@ -6,7 +6,9 @@ import relativeTime from "dayjs/plugin/relativeTime";
 import validator from "validator";
 
 import WifiNetworksCard from "@components/WifiNetworksCard";
+import BluetoothWifiSetup from "@components/BluetoothWifiSetup";
 import PublicIPCard from "@components/PublicIPCard";
+import Q1WireGuardCard from "@components/Q1WireGuardCard";
 import TailscaleCard from "@components/TailscaleCard";
 import {
   NetworkSettings,
@@ -99,6 +101,8 @@ export default function SettingsNetworkRoute() {
   const hasMdns = useCapability("mdns");
   const hasIpv6 = useCapability("ipv6");
   const hasWifi = useCapability("wifi");
+  const hasBleWifi = useCapability("bluetooth_wifi");
+  const hasWireGuard = useCapability("wireguard");
   const hasTailscale = useCapability("tailscale");
   const setNetworkState = useNetworkStateStore(state => state.setNetworkState);
 
@@ -416,6 +420,7 @@ export default function SettingsNetworkRoute() {
           />
           <div className="space-y-4">
             {hasWifi && <WifiNetworksCard onSwitched={reloadSettings} />}
+            {hasBleWifi && <BluetoothWifiSetup />}
             <div className="flex items-center justify-between">
               <SettingsItem
                 title={m.network_mac_address_title()}
@@ -559,7 +564,8 @@ export default function SettingsNetworkRoute() {
                 description={m.network_dhcp_client_description()}
               >
                 {/* A device with a single, fixed DHCP client reports its own name. */}
-                {dhcpClient && !DhcpClientOptions.includes(dhcpClient) ? (
+                {watch("fixed_dhcp_client") ||
+                (dhcpClient && !DhcpClientOptions.includes(dhcpClient)) ? (
                   <span className="font-mono text-sm text-black dark:text-white">{dhcpClient}</span>
                 ) : (
                   <SelectMenuBasic
@@ -589,6 +595,7 @@ export default function SettingsNetworkRoute() {
 
               {isCloudAdopted && <PublicIPCard />}
 
+              {hasWireGuard && <Q1WireGuardCard />}
               {hasTailscale && <TailscaleCard />}
 
               <div>

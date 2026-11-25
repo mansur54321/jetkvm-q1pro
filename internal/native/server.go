@@ -114,6 +114,8 @@ func RunNativeProcess(binaryName string) {
 
 	// Create native instance
 	nativeInstance := NewNative(*nativeOptions)
+	grpcLogger := logger.With().Str("socketPath", fmt.Sprintf("@%v", proxyOptions.CtrlUnixSocket)).Logger()
+	grpcServer := NewGRPCServer(nativeInstance, &grpcLogger)
 	gspt.SetProcTitle("jetkvm: [native] initializing")
 
 	// Start native instance
@@ -121,10 +123,7 @@ func RunNativeProcess(binaryName string) {
 		logger.Fatal().Err(err).Msg("failed to start native instance")
 	}
 
-	grpcLogger := logger.With().Str("socketPath", fmt.Sprintf("@%v", proxyOptions.CtrlUnixSocket)).Logger()
 	setProcTitle("starting gRPC server")
-	// Create gRPC server
-	grpcServer := NewGRPCServer(nativeInstance, &grpcLogger)
 
 	logger.Info().Msg("starting gRPC server")
 	// Start gRPC server

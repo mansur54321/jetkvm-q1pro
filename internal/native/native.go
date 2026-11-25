@@ -12,13 +12,12 @@ import (
 )
 
 type Native struct {
+	nativeDisplay
 	ready                chan struct{}
 	l                    *zerolog.Logger
-	lD                   *zerolog.Logger
-	systemVersion        *semver.Version
-	appVersion           *semver.Version
-	displayRotation      uint16
 	defaultQualityFactor float64
+	retryVideoInit       bool
+	startVideoWhenReady  bool
 	onVideoStateChange   func(state VideoState)
 	onVideoFrameReceived func(frame []byte, pts time.Duration)
 	onIndevEvent         func(event string)
@@ -34,6 +33,7 @@ type NativeOptions struct {
 	AppVersion           *semver.Version
 	DisplayRotation      uint16
 	DefaultQualityFactor float64
+	RetryVideoInit       bool
 	MaxRestartAttempts   uint
 	OnVideoStateChange   func(state VideoState)
 	OnVideoFrameReceived func(frame []byte, pts time.Duration)
@@ -107,11 +107,9 @@ func NewNative(opts NativeOptions) *Native {
 	return &Native{
 		ready:                make(chan struct{}),
 		l:                    &nativeSubLogger,
-		lD:                   &displaySubLogger,
-		systemVersion:        opts.SystemVersion,
-		appVersion:           opts.AppVersion,
-		displayRotation:      opts.DisplayRotation,
+		nativeDisplay:        newNativeDisplay(opts, &displaySubLogger),
 		defaultQualityFactor: defaultQualityFactor,
+		retryVideoInit:       opts.RetryVideoInit,
 		onVideoStateChange:   onVideoStateChange,
 		onVideoFrameReceived: onVideoFrameReceived,
 		onIndevEvent:         onIndevEvent,
@@ -136,16 +134,63 @@ func (n *Native) Start() error {
 	go n.handleIndevEventChan()
 	go n.handleRpcEventChan()
 
-	n.initUI()
-	go n.tickUI()
+	n.startDisplay()
 
-	if err := videoInit(n.defaultQualityFactor); err != nil {
-		n.l.Error().Err(err).Msg("failed to initialize video")
-		return err
+	initialize := videoInit
+	if n.retryVideoInit {
+		initialize = func(factor float64) error {
+			for _, device := range []string{"/dev/v4l-subdev2", "/dev/video0"} {
+				if _, err := os.Stat(device); err != nil {
+					return err
+				}
+			}
+			return videoInit(factor)
+		}
 	}
+	return n.initializeVideo(initialize, 3*time.Second)
+}
 
-	close(n.ready)
+func (n *Native) initializeVideo(init func(float64) error, retryDelay time.Duration) error {
+	try := func() error {
+		n.videoLock.Lock()
+		defer n.videoLock.Unlock()
+		if err := init(n.defaultQualityFactor); err != nil {
+			return err
+		}
+		close(n.ready)
+		if n.startVideoWhenReady {
+			n.startVideoWhenReady = false
+			n.startVideoLocked()
+		}
+		return nil
+	}
+	if !n.retryVideoInit {
+		return try()
+	}
+	// Bring up the control plane even when the capture devices have not probed yet.
+	go func() {
+		if err := try(); err != nil {
+			n.l.Warn().Err(err).Msg("video capture unavailable, waiting for the driver")
+			n.onVideoStateChange(VideoState{Error: "device_unavailable"})
+			for {
+				time.Sleep(retryDelay)
+				if try() == nil {
+					n.l.Info().Msg("video capture available")
+					return
+				}
+			}
+		}
+	}()
 	return nil
+}
+
+func (n *Native) videoInitialized() bool {
+	select {
+	case <-n.ready:
+		return true
+	default:
+		return false
+	}
 }
 
 // DoNotUseThisIsForCrashTestingOnly

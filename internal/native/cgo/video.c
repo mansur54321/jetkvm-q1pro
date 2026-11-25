@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <unistd.h>
 #include <time.h>
+#include <stdio.h>
 #include <rk_type.h>
 #include <rk_mpi_venc.h>
 #include <rk_mpi_sys.h>
@@ -12,18 +13,20 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
+#include <sys/eventfd.h>
+#include <limits.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdatomic.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <rk_mpi_mmz.h>
 #include <pthread.h>
 #include <assert.h>
 #include <sys/un.h>
 #include <sys/socket.h>
 #include "video.h"
+#include "capture_limits.h"
 #include "ctrl.h"
 #include "log.h"
 
@@ -46,6 +49,7 @@ float quality_factor = 1.0f;
 int codec_type = 0;
 
 static void *venc_read_stream(void *arg);
+static bool use_q1_capture_pool;
 
 RK_U64 get_us()
 {
@@ -165,7 +169,7 @@ static void configure_vui_video_signal(VENC_VUI_VIDEO_SIGNAL_S *video_signal, RK
     }
 }
 
-static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 max_bitrate, RK_U32 width, RK_U32 height, RK_U32 fps)
+static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 max_bitrate, RK_U32 width, RK_U32 height, RK_U32 stride_pixels, RK_U32 fps)
 {
     memset(stAttr, 0, sizeof(VENC_CHN_ATTR_S));
 
@@ -210,8 +214,10 @@ static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 m
     stAttr->stVencAttr.enPixelFormat = RK_FMT_YUV422_YUYV;
     stAttr->stVencAttr.u32PicWidth = width;
     stAttr->stVencAttr.u32PicHeight = height;
-    stAttr->stVencAttr.u32VirWidth = RK_ALIGN_16(width);
+    stAttr->stVencAttr.u32VirWidth = stride_pixels;
     stAttr->stVencAttr.u32VirHeight = RK_ALIGN_16(height);
+    if (use_q1_capture_pool)
+        stAttr->stVencAttr.bByFrame = RK_TRUE;
     stAttr->stVencAttr.u32StreamBufCnt = 3;
     stAttr->stVencAttr.u32BufSize = width * height * 3 / 2;
     stAttr->stVencAttr.enMirror = MIRROR_NONE;
@@ -261,16 +267,16 @@ static void venc_configure_limited_range_vui(RK_U32 height)
     log_info("configured VENC VUI as limited-range %s", is_hd_video(height) ? "BT.709" : "BT.601");
 }
 
-pthread_t *venc_read_thread = NULL;
-volatile bool venc_running = false;
-static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, int32_t height, int32_t fps)
+static pthread_t venc_read_thread;
+static atomic_bool venc_running;
+static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, int32_t height, uint32_t stride_pixels, int32_t fps)
 {
     int32_t ret;
     VENC_CHN_ATTR_S stAttr;
-    populate_venc_attr(&stAttr, bitrate, max_bitrate, width, height, fps);
+    populate_venc_attr(&stAttr, bitrate, max_bitrate, width, height, stride_pixels, fps);
 
     ret = RK_MPI_VENC_CreateChn(VENC_CHANNEL, &stAttr);
-    if (ret < 0)
+    if (ret != RK_SUCCESS)
     {
         RK_LOGE("error RK_MPI_VENC_CreateChn, %d", ret);
         return ret;
@@ -282,50 +288,51 @@ static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, i
     memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
     stRecvParam.s32RecvPicNum = -1;
     ret = RK_MPI_VENC_StartRecvFrame(VENC_CHANNEL, &stRecvParam);
-    if (ret < 0)
+    if (ret != RK_SUCCESS)
     {
         RK_LOGE("error RK_MPI_VENC_StartRecvFrame, %d", ret);
-        return ret;
+        goto destroy_channel;
     }
 
     venc_running = true;
-    venc_read_thread = malloc(sizeof(pthread_t));
-    if (pthread_create(venc_read_thread, NULL, venc_read_stream, NULL) != 0)
+    int thread_error = pthread_create(&venc_read_thread, NULL, venc_read_stream, NULL);
+    if (thread_error != 0)
     {
-        RK_LOGE("Failed to create venc_read_thread");
-        return RK_FAILURE;
+        RK_LOGE("Failed to create venc_read_thread: %s", strerror(thread_error));
+        venc_running = false;
+        if (RK_MPI_VENC_StopRecvFrame(VENC_CHANNEL) != RK_SUCCESS)
+            log_error("Failed to stop VENC after thread creation error");
+        ret = RK_FAILURE;
+        goto destroy_channel;
     }
 
     return RK_SUCCESS;
+
+destroy_channel:
+    if (RK_MPI_VENC_DestroyChn(VENC_CHANNEL) != RK_SUCCESS)
+        log_error("Failed to destroy VENC after initialization error");
+    return ret;
 }
 
 static int32_t venc_stop()
 {
     venc_running = false;
+    pthread_join(venc_read_thread, NULL);
 
-    int32_t ret;
-    ret = RK_MPI_VENC_StopRecvFrame(VENC_CHANNEL);
+    int32_t ret = RK_MPI_VENC_StopRecvFrame(VENC_CHANNEL);
     if (ret != RK_SUCCESS)
     {
         RK_LOGE("Failed to stop receiving frames for VENC_CHANNEL, error code: %d", ret);
-        return ret;
     }
 
-    if (venc_read_thread != NULL)
+    int32_t destroy_ret = RK_MPI_VENC_DestroyChn(VENC_CHANNEL);
+    if (destroy_ret != RK_SUCCESS)
     {
-        pthread_join(*venc_read_thread, NULL);
-        free(venc_read_thread);
-        venc_read_thread = NULL;
+        RK_LOGE("Failed to destroy VENC_CHANNEL, error code: %d", destroy_ret);
+        return destroy_ret;
     }
 
-    ret = RK_MPI_VENC_DestroyChn(VENC_CHANNEL);
-    if (ret != RK_SUCCESS)
-    {
-        RK_LOGE("Failed to destroy VENC_CHANNEL, error code: %d", ret);
-        return ret;
-    }
-
-    return RK_SUCCESS;
+    return ret;
 }
 
 struct buffer
@@ -334,17 +341,108 @@ struct buffer
     MB_BLK mb_blk;
 };
 
-const int input_buffer_count = 3;
+enum { input_buffer_count = 3 };
+static pthread_mutex_t capture_ack_lock = PTHREAD_MUTEX_INITIALIZER;
+static int capture_ack_fd = -1;
+static struct {
+    uint64_t pts;
+    bool encoded;
+} capture_pending[input_buffer_count];
+
+// Only the capture thread queues V4L2 buffers. The VENC thread notifies it
+// after it receives the encoded frame with that input's PTS.
+static void acknowledge_capture(uint64_t pts)
+{
+    if (!pts || capture_ack_fd < 0)
+        return;
+    pthread_mutex_lock(&capture_ack_lock);
+    for (unsigned i = 0; i < input_buffer_count; i++)
+    {
+        if (capture_pending[i].pts == pts && !capture_pending[i].encoded)
+        {
+            capture_pending[i].encoded = true;
+            while (eventfd_write(capture_ack_fd, 1) < 0 && errno == EINTR) {}
+            break;
+        }
+    }
+    pthread_mutex_unlock(&capture_ack_lock);
+}
+
+static int queue_capture(int fd, unsigned index, struct buffer *buffers)
+{
+    struct v4l2_buffer buf = {
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+        .memory = V4L2_MEMORY_DMABUF,
+        .index = index,
+        .length = 1,
+        .m.planes = &buffers[index].plane_buffer,
+    };
+    if (ioctl(fd, VIDIOC_QBUF, &buf) < 0)
+    {
+        log_error("VIDIOC_QBUF %u failed: %s", index, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int reclaim_encoded(int fd, struct buffer *buffers)
+{
+    uint64_t now = get_us();
+    unsigned ready = 0;
+    int pending = 0;
+    pthread_mutex_lock(&capture_ack_lock);
+    for (unsigned i = 0; i < input_buffer_count; i++)
+    {
+        if (!capture_pending[i].pts)
+            continue;
+        if (capture_pending[i].encoded)
+        {
+            capture_pending[i].pts = 0;
+            capture_pending[i].encoded = false;
+            ready |= 1U << i;
+        }
+        else if (now - capture_pending[i].pts > 2000000)
+        {
+            log_error("VENC did not finish capture slot %u within two seconds", i);
+            pending = -1;
+            break;
+        }
+        else
+            pending++;
+    }
+    pthread_mutex_unlock(&capture_ack_lock);
+    for (unsigned i = 0; i < input_buffer_count; i++)
+        if ((ready & (1U << i)) && queue_capture(fd, i, buffers) < 0)
+            return -1;
+    return pending;
+}
+
 
 // The size of one capture buffer in the pool. A frame that needs more is not
 // captured: a request to the pool for a larger block does not return.
-const uint32_t input_buffer_size = 1920 * 1080 * 3;
-
-static int32_t buf_init()
+static uint32_t capture_block_bytes(void)
 {
+    return use_q1_capture_pool ? Q1_CAPTURE_BLOCK_BYTES : 1920 * 1080 * 3;
+}
+
+static bool has_q1_capture_sku(void)
+{
+    FILE *file = fopen("/etc/jetkvm-sku", "r");
+    if (!file)
+        return false;
+    char sku[32] = {0};
+    if (fgets(sku, sizeof(sku), file))
+        sku[strcspn(sku, "\r\n")] = 0;
+    fclose(file);
+    return strcmp(sku, "oraybox-q1pro") == 0;
+}
+
+static int32_t buf_init(bool q1_pro)
+{
+    use_q1_capture_pool = q1_pro;
     MB_POOL_CONFIG_S stMbPoolCfg;
     memset(&stMbPoolCfg, 0, sizeof(MB_POOL_CONFIG_S));
-    stMbPoolCfg.u64MBSize = input_buffer_size;
+    stMbPoolCfg.u64MBSize = capture_block_bytes();
     stMbPoolCfg.u32MBCnt = input_buffer_count;
     stMbPoolCfg.enAllocType = MB_ALLOC_TYPE_DMA;
     stMbPoolCfg.bPreAlloc = RK_TRUE;
@@ -358,45 +456,45 @@ static int32_t buf_init()
     return RK_SUCCESS;
 }
 
-pthread_t *format_thread = NULL;
-
 int video_init(float factor)
 {
-    detect_sleep_mode();
-
-    if (factor <= 0) {
-        factor = 1.0f;
-    }
-    quality_factor = factor;
-
-    if (RK_MPI_SYS_Init() != RK_SUCCESS)
-    {
-        log_error("RK_MPI_SYS_Init failed");
-        return RK_FAILURE;
-    }
-
+    sub_dev_fd = open(SUB_DEV, O_RDWR);
     if (sub_dev_fd < 0)
     {
-        sub_dev_fd = open(SUB_DEV, O_RDWR);
-        if (sub_dev_fd < 0)
-        {
-            log_error("failed to open control sub device %s: %s", SUB_DEV, strerror(errno));
-            return errno;
-        }
-        log_info("opened control sub device %s", SUB_DEV);
+        int err = errno;
+        log_error("failed to open control sub device %s: %s", SUB_DEV, strerror(err));
+        return err;
     }
-
-    int32_t ret = buf_init();
+    detect_sleep_mode();
+    quality_factor = factor > 0 ? factor : 1.0f;
+    int32_t ret = RK_MPI_SYS_Init();
+    if (ret != RK_SUCCESS)
+    {
+        log_error("RK_MPI_SYS_Init failed");
+        goto close_device;
+    }
+    ret = buf_init(has_q1_capture_sku());
     if (ret != RK_SUCCESS)
     {
         log_error("buf_init failed with error: %d", ret);
-        return ret;
+        goto exit_mpi;
     }
-    log_info("buf_init completed successfully");
-
-    format_thread = malloc(sizeof(pthread_t));
-    pthread_create(format_thread, NULL, run_detect_format, NULL);
-    return RK_SUCCESS;
+    pthread_t format_thread;
+    ret = pthread_create(&format_thread, NULL, run_detect_format, NULL);
+    if (!ret)
+    {
+        pthread_detach(format_thread);
+        return RK_SUCCESS;
+    }
+    log_error("failed to create format detector: %s", strerror(ret));
+    RK_MPI_MB_DestroyPool(memPool);
+    memPool = MB_INVALID_POOLID;
+exit_mpi:
+    RK_MPI_SYS_Exit();
+close_device:
+    close(sub_dev_fd);
+    sub_dev_fd = -1;
+    return ret;
 }
 
 // static int32_t venc_set_param(int32_t bitrate, int32_t max_bitrate, int32_t width, int32_t height)
@@ -437,12 +535,11 @@ int video_init(float factor)
 static void *venc_read_stream(void *arg)
 {
     (void)arg;
-    void *pData = RK_NULL;
     int loopCount = 0;
     int s32Ret;
 
-    VENC_STREAM_S stFrame;
-    stFrame.pstPack = malloc(sizeof(VENC_PACK_S));
+    VENC_PACK_S pack = {0};
+    VENC_STREAM_S stFrame = {.pstPack = &pack};
     while (venc_running)
     {
         log_trace("RK_MPI_VENC_GetStream");
@@ -453,8 +550,20 @@ static void *venc_read_stream(void *arg)
             log_trace("chn:0, loopCount:%d enc->seq:%d wd:%d pts=%llu delay=%lldus",
                    loopCount, stFrame.u32Seq, stFrame.pstPack->u32Len,
                    stFrame.pstPack->u64PTS, nowUs - stFrame.pstPack->u64PTS);
-            pData = RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
-            video_send_frame(pData, (ssize_t)stFrame.pstPack->u32Len, stFrame.pstPack->u64PTS);
+            VENC_PACK_S *packet = stFrame.pstPack;
+            if (use_q1_capture_pool && packet->bFrameEnd)
+                acknowledge_capture(packet->u64PTS);
+            uint8_t *base = RK_MPI_MB_Handle2VirAddr(packet->pMbBlk);
+            uint64_t capacity = RK_MPI_MB_GetSize(packet->pMbBlk);
+            // Rockit maps this packet's MB at its payload. u32Offset is its
+            // position in the encoder ring, not an offset into the mapped MB.
+            if (base && capacity != UINT64_MAX && packet->u32Len <= capacity &&
+                packet->u32Len <= INT_MAX)
+                video_send_frame(base, packet->u32Len, packet->u64PTS);
+            else
+                log_error("Invalid mapped VENC payload: ring offset %u length %u capacity %llu",
+                          packet->u32Offset, packet->u32Len, (unsigned long long)capacity);
+
             s32Ret = RK_MPI_VENC_ReleaseStream(VENC_CHANNEL, &stFrame);
             if (s32Ret != RK_SUCCESS)
             {
@@ -473,7 +582,6 @@ static void *venc_read_stream(void *arg)
         }
     }
     log_info("exiting venc_read_stream");
-    free(stFrame.pstPack);
     return NULL;
 }
 
@@ -538,6 +646,7 @@ void *run_video_stream(void *arg)
 {
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 
+    const uint32_t input_buffer_size = capture_block_bytes();
     log_info("running video stream");
 
     set_streaming_stopped(false);
@@ -581,10 +690,20 @@ void *run_video_stream(void *arg)
                  fmt.fmt.pix_mp.colorspace, fmt.fmt.pix_mp.ycbcr_enc,
                  fmt.fmt.pix_mp.quantization, fmt.fmt.pix_mp.xfer_func);
 
-        if (fmt.fmt.pix_mp.plane_fmt[0].sizeimage > input_buffer_size)
+        const struct v4l2_pix_format_mplane *capture = &fmt.fmt.pix_mp;
+        const struct v4l2_plane_pix_format *plane = &capture->plane_fmt[0];
+        const uint32_t stride_pixels = plane->bytesperline / 2;
+        if (capture->pixelformat != V4L2_PIX_FMT_YUYV || capture->num_planes != 1 ||
+            !width || !height || capture->width != width || capture->height != height ||
+            plane->bytesperline % 32 != 0 || stride_pixels < width ||
+            (uint64_t)plane->bytesperline * height > plane->sizeimage ||
+            plane->sizeimage > input_buffer_size ||
+            (uint64_t)plane->bytesperline * RK_ALIGN_16((uint64_t)height) > input_buffer_size)
         {
-            log_error("a %ux%u frame of %u bytes does not fit a capture buffer of %u bytes",
-                      width, height, fmt.fmt.pix_mp.plane_fmt[0].sizeimage, input_buffer_size);
+            log_error("Cannot encode capture format %#x %ux%u, %u planes, %u bytes/line, %u bytes; "
+                      "expected single-plane YUYV %ux%u with a 16-pixel aligned stride, buffer limit %u",
+                      capture->pixelformat, capture->width, capture->height, capture->num_planes,
+                      plane->bytesperline, plane->sizeimage, width, height, input_buffer_size);
             close(video_dev_fd);
             usleep(1000000);
             continue;
@@ -592,7 +711,7 @@ void *run_video_stream(void *arg)
 
         struct v4l2_buffer buf;
 
-        struct v4l2_requestbuffers req;
+        struct v4l2_requestbuffers req = {0};
         req.count = input_buffer_count;
         req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         req.memory = V4L2_MEMORY_DMABUF;
@@ -601,16 +720,20 @@ void *run_video_stream(void *arg)
         {
             log_error("VIDIOC_REQBUFS failed: %s", strerror(errno));
             close(video_dev_fd);
-            return (void *)errno;
+            usleep(1000000);
+            continue;
         }
         log_info("VIDIOC_REQBUFS successful");
 
         struct buffer buffers[3] = {};
+        bool capture_started = false;
+        bool encoder_started = false;
         log_info("allocated buffers");
 
-        for (int i = 0; i < input_buffer_count; i++)
+        int queried = 0;
+        for (; queried < input_buffer_count; queried++)
         {
-            struct v4l2_plane *planes_buffer = &buffers[i].plane_buffer;
+            struct v4l2_plane *planes_buffer = &buffers[queried].plane_buffer;
             memset(planes_buffer, 0, sizeof(struct v4l2_plane));
 
             memset(&buf, 0, sizeof(buf));
@@ -618,26 +741,38 @@ void *run_video_stream(void *arg)
             buf.memory = V4L2_MEMORY_DMABUF;
             buf.m.planes = planes_buffer;
             buf.length = 1;
-            buf.index = i;
+            buf.index = queried;
 
             if (-1 == ioctl(video_dev_fd, VIDIOC_QUERYBUF, &buf))
             {
                 log_error("VIDIOC_QUERYBUF failed: %s", strerror(errno));
-                req.count = i;
-                close(video_dev_fd);
-                return (void *)errno;
+                break;
             }
-            log_info("VIDIOC_QUERYBUF successful for buffer %d", i);
+            if (planes_buffer->length < plane->sizeimage || planes_buffer->length > input_buffer_size)
+            {
+                log_error("Capture buffer %d requires %u bytes, expected %u to %u",
+                          queried, planes_buffer->length, plane->sizeimage, input_buffer_size);
+                break;
+            }
+            log_info("VIDIOC_QUERYBUF successful for buffer %d", queried);
 
             log_info("plane: length = %d", planes_buffer->length);
             log_info("plane: offset = %d", planes_buffer->m.mem_offset);
-
-            MB_BLK blk = RK_MPI_MB_GetMB(memPool, (planes_buffer)->length, RK_TRUE);
+        }
+        if (queried != input_buffer_count)
+        {
+            close(video_dev_fd);
+            usleep(1000000);
+            continue;
+        }
+        for (int i = 0; i < input_buffer_count; i++)
+        {
+            struct v4l2_plane *planes_buffer = &buffers[i].plane_buffer;
+            MB_BLK blk = RK_MPI_MB_GetMB(memPool, input_buffer_size, RK_FALSE);
             if (blk == NULL)
             {
                 log_error("get mb blk failed!");
-                close(video_dev_fd);
-                return (void *)errno;
+                goto cleanup;
             }
             log_info("Got memory block for buffer %d", i);
 
@@ -647,8 +782,7 @@ void *run_video_stream(void *arg)
             if (buf_fd < 0)
             {
                 log_error("RK_MPI_MB_Handle2Fd failed!");
-                close(video_dev_fd);
-                return (void *)errno;
+                goto cleanup;
             }
             log_info("Converted memory block to file descriptor for buffer %d", i);
             planes_buffer->m.fd = buf_fd;
@@ -656,39 +790,39 @@ void *run_video_stream(void *arg)
 
         for (int i = 0; i < input_buffer_count; ++i)
         {
-            struct v4l2_buffer buf;
-            memset(&buf, 0, sizeof(buf));
-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-            buf.memory = V4L2_MEMORY_DMABUF;
-            buf.length = 1;
-            buf.index = i;
-            buf.m.planes = &buffers[i].plane_buffer;
-            if (ioctl(video_dev_fd, VIDIOC_QBUF, &buf) < 0)
-            {
-                log_error("VIDIOC_QBUF failed: %s", strerror(errno));
-                close(video_dev_fd);
-                return (void *)errno;
-            }
+            if (queue_capture(video_dev_fd, i, buffers) < 0)
+                goto cleanup;
             log_info("VIDIOC_QBUF successful for buffer %d", i);
         }
 
         if (ioctl(video_dev_fd, VIDIOC_STREAMON, &type) < 0)
         {
             log_error("VIDIOC_STREAMON failed: %s", strerror(errno));
-            close(video_dev_fd);
-            return (void *)errno;
+            goto cleanup;
         }
+        capture_started = true;
 
-        struct v4l2_plane tmp_plane;
+        struct v4l2_plane tmp_plane = {0};
 
         // Set VENC parameters
         int32_t bitrate = calculate_bitrate(quality_factor, width, height);
-        RK_S32 ret = venc_start(bitrate, bitrate * 3 / 2, width, height, fps);
+        if (use_q1_capture_pool)
+        {
+            memset(capture_pending, 0, sizeof(capture_pending));
+            capture_ack_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (capture_ack_fd < 0 || capture_ack_fd >= FD_SETSIZE)
+            {
+                log_error("Cannot watch VENC completions");
+                goto cleanup;
+            }
+        }
+        RK_S32 ret = venc_start(bitrate, bitrate * 3 / 2, width, height, stride_pixels, fps);
         if (ret != RK_SUCCESS)
         {
             log_error("Set VENC parameters failed with %#x", ret);
             goto cleanup;
         }
+        encoder_started = true;
 
         fd_set fds;
         struct timeval tv;
@@ -698,7 +832,7 @@ void *run_video_stream(void *arg)
         memset(&stFrame, 0, sizeof(VIDEO_FRAME_INFO_S));
         stFrame.stVFrame.u32Width = width;
         stFrame.stVFrame.u32Height = height;
-        stFrame.stVFrame.u32VirWidth = RK_ALIGN_16(width);
+        stFrame.stVFrame.u32VirWidth = stride_pixels;
         stFrame.stVFrame.u32VirHeight = RK_ALIGN_16(height);
         stFrame.stVFrame.enField = VIDEO_FIELD_FRAME;
         stFrame.stVFrame.enPixelFormat = RK_FMT_YUV422_YUYV;
@@ -709,14 +843,23 @@ void *run_video_stream(void *arg)
 
         while (streaming_flag)
         {
+            int pending = use_q1_capture_pool ? reclaim_encoded(video_dev_fd, buffers) : 0;
+            if (pending < 0 || !streaming_flag)
+                break;
             FD_ZERO(&fds);
-            FD_SET(video_dev_fd, &fds);
+            if (pending < input_buffer_count)
+                FD_SET(video_dev_fd, &fds);
+            if (capture_ack_fd >= 0)
+                FD_SET(capture_ack_fd, &fds);
             tv.tv_sec = 1;
             tv.tv_usec = 0;
 
-            r = select(video_dev_fd + 1, &fds, NULL, NULL, &tv);
+            int maxfd = video_dev_fd > capture_ack_fd ? video_dev_fd : capture_ack_fd;
+            r = select(maxfd + 1, &fds, NULL, NULL, &tv);
             if (r == 0)
             {
+                if (pending)
+                    continue;
                 log_info("select timeout");
                 ensure_sleep_mode_disabled();
                 break;
@@ -730,6 +873,13 @@ void *run_video_stream(void *arg)
                 log_error("select in video streaming");
                 break;
             }
+            if (capture_ack_fd >= 0 && FD_ISSET(capture_ack_fd, &fds))
+            {
+                eventfd_t completions;
+                while (eventfd_read(capture_ack_fd, &completions) < 0 && errno == EINTR) {}
+            }
+            if (!FD_ISSET(video_dev_fd, &fds))
+                continue;
             memset(&buf, 0, sizeof(buf));
             buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
             buf.memory = V4L2_MEMORY_DMABUF;
@@ -741,14 +891,33 @@ void *run_video_stream(void *arg)
                 break;
             }
             log_trace("got frame, bytesused = %d", tmp_plane.bytesused);
-            MB_BLK blk = RK_MPI_MMZ_Fd2Handle(tmp_plane.m.fd);
-            assert(blk != RK_NULL);
-            stFrame.stVFrame.pMbBlk = blk;
+            if (buf.index >= input_buffer_count)
+            {
+                log_error("Unexpected dequeued buffer index %u", buf.index);
+                break;
+            }
+            if (use_q1_capture_pool && ((buf.flags & V4L2_BUF_FLAG_ERROR) || tmp_plane.data_offset ||
+                tmp_plane.bytesused < (uint64_t)plane->bytesperline * height))
+            {
+                if (queue_capture(video_dev_fd, buf.index, buffers) < 0)
+                    break;
+                continue;
+            }
+            stFrame.stVFrame.pMbBlk = buffers[buf.index].mb_blk;
             stFrame.stVFrame.u32TimeRef = num;
             stFrame.stVFrame.u64PTS = get_us();
+            if (use_q1_capture_pool)
+            {
+                pthread_mutex_lock(&capture_ack_lock);
+                capture_pending[buf.index].pts = stFrame.stVFrame.u64PTS;
+                capture_pending[buf.index].encoded = false;
+                pthread_mutex_unlock(&capture_ack_lock);
+            }
             bool retried = false;
+            RK_S32 send_result;
         retry_send_frame:
-            if (RK_MPI_VENC_SendFrame(VENC_CHANNEL, &stFrame, 2000) != RK_SUCCESS)
+            send_result = RK_MPI_VENC_SendFrame(VENC_CHANNEL, &stFrame, 2000);
+            if (send_result != RK_SUCCESS)
             {
                 if (retried == true)
                 {
@@ -765,12 +934,20 @@ void *run_video_stream(void *arg)
 
             num++;
 
-            if (ioctl(video_dev_fd, VIDIOC_QBUF, &buf) < 0)
-                log_error("failure VIDIOC_QBUF: %s", strerror(errno));
+            if (use_q1_capture_pool && send_result == RK_SUCCESS)
+                continue;
+            if (use_q1_capture_pool)
+            {
+                pthread_mutex_lock(&capture_ack_lock);
+                capture_pending[buf.index].pts = 0;
+                pthread_mutex_unlock(&capture_ack_lock);
+            }
+            if (queue_capture(video_dev_fd, buf.index, buffers) < 0)
+                break;
         }
     cleanup:
         log_info("cleaning up video capture device %s", VIDEO_DEV);
-        if (ioctl(video_dev_fd, VIDIOC_STREAMOFF, &type) < 0)
+        if (capture_started && ioctl(video_dev_fd, VIDIOC_STREAMOFF, &type) < 0)
         {
             log_error("VIDIOC_STREAMOFF failed: %s", strerror(errno));
         }
@@ -787,7 +964,14 @@ void *run_video_stream(void *arg)
             log_error("Failed to free V4L2 buffers: %s", strerror(errno));
         }
 
-        venc_stop();
+        close(video_dev_fd);
+        if (encoder_started)
+            venc_stop();
+        if (capture_ack_fd >= 0)
+        {
+            close(capture_ack_fd);
+            capture_ack_fd = -1;
+        }
 
         for (int i = 0; i < input_buffer_count; i++)
         {
@@ -797,8 +981,8 @@ void *run_video_stream(void *arg)
             }
         }
 
-        log_info("closing video capture device %s", VIDEO_DEV);
-        close(video_dev_fd);
+        if (!encoder_started)
+            usleep(1000000);
     }
 
     log_info("video stream thread exiting");
@@ -995,7 +1179,8 @@ void *run_detect_format(void *arg)
                 continue;
             }
         }
-        else if ((uint64_t)dv_timings.bt.width * dv_timings.bt.height * 2 > input_buffer_size)
+        else if (use_q1_capture_pool ? !q1_capture_timing_fits(dv_timings.bt.width, dv_timings.bt.height) :
+                 (uint64_t)dv_timings.bt.width * dv_timings.bt.height * 2 > capture_block_bytes())
         {
             // A YUYV frame of this size, at 2 bytes for each pixel, does not
             // fit a capture buffer.

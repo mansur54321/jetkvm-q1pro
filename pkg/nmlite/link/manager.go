@@ -389,7 +389,7 @@ func (nm *NetlinkManager) RemoveDefaultRoute(family int) error {
 	return nil
 }
 
-func (nm *NetlinkManager) reconcileDefaultRoutes(link *Link, expected map[string]net.IP, family int, protocol netlink.RouteProtocol) error {
+func (nm *NetlinkManager) reconcileDefaultRoutes(link *Link, expected map[string]net.IP, family int, protocol netlink.RouteProtocol, metric int) error {
 	linkAttrs := link.Attrs()
 	l := nm.logger.With().Str("interface", linkAttrs.Name).Int("linkIndex", linkAttrs.Index).Int("family", family).Logger()
 
@@ -418,7 +418,7 @@ func (nm *NetlinkManager) reconcileDefaultRoutes(link *Link, expected map[string
 		key := defaultRoute.Gw.String()
 		ll.Trace().Str("key", key).Msg("checking default route")
 
-		if _, ok := expected[key]; !ok {
+		if _, ok := expected[key]; !ok || (metric != 0 && defaultRoute.Priority != metric) {
 			ll.Debug().Str("key", key).Msg("not in expected routes, marked for removal")
 			toRemove = append(toRemove, &defaultRoute)
 			continue
@@ -444,6 +444,7 @@ func (nm *NetlinkManager) reconcileDefaultRoutes(link *Link, expected map[string
 
 		route := &netlink.Route{
 			Gw:        gateway,
+			Priority:  metric,
 			LinkIndex: linkAttrs.Index,
 			Scope:     netlink.SCOPE_UNIVERSE,
 			Table:     MainRoutingTable,
@@ -476,6 +477,10 @@ func (nm *NetlinkManager) reconcileDefaultRoutes(link *Link, expected map[string
 
 // ReconcileLink reconciles the addresses and routes of a link
 func (nm *NetlinkManager) ReconcileLink(link *Link, expected []types.IPAddress, family int, protocol netlink.RouteProtocol) error {
+	return nm.ReconcileLinkWithMetric(link, expected, family, protocol, 0)
+}
+
+func (nm *NetlinkManager) ReconcileLinkWithMetric(link *Link, expected []types.IPAddress, family int, protocol netlink.RouteProtocol, metric int) error {
 	l := nm.logger.With().Interface("link", link.Link).Int("family", family).Logger()
 
 	toAdd := make([]*types.IPAddress, 0)
@@ -583,7 +588,7 @@ func (nm *NetlinkManager) ReconcileLink(link *Link, expected []types.IPAddress, 
 			Msg("addresses reconciled")
 	}
 
-	if err := nm.reconcileDefaultRoutes(link, expectedGateways, family, protocol); err != nil {
+	if err := nm.reconcileDefaultRoutes(link, expectedGateways, family, protocol, metric); err != nil {
 		l.Warn().Err(err).Msg("failed to reconcile default route")
 	}
 

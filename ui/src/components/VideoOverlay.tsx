@@ -289,6 +289,16 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
     });
   }, [send, wakeAttemptPending]);
 
+  if (show && hdmiState === "device_unavailable") {
+    return (
+      <div className="absolute inset-0">
+        <OverlayContent>
+          <p className="text-xl font-bold">{m.video_overlay_capture_unavailable()}</p>
+        </OverlayContent>
+      </div>
+    );
+  }
+
   return (
     <>
       <AnimatePresence>

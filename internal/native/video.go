@@ -144,6 +144,13 @@ func (n *Native) VideoSetQualityFactor(factor float64) error {
 	n.videoLock.Lock()
 	defer n.videoLock.Unlock()
 
+	if n.retryVideoInit && !n.videoInitialized() {
+		if factor <= 0 {
+			return fmt.Errorf("failed to set quality factor: %v", factor)
+		}
+		n.defaultQualityFactor = factor
+		return nil
+	}
 	return n.useExtraLock(func() error {
 		return videoSetStreamQualityFactor(factor)
 	})
@@ -154,6 +161,9 @@ func (n *Native) VideoGetQualityFactor() (float64, error) {
 	n.videoLock.Lock()
 	defer n.videoLock.Unlock()
 
+	if n.retryVideoInit && !n.videoInitialized() {
+		return n.defaultQualityFactor, nil
+	}
 	return videoGetStreamQualityFactor()
 }
 
@@ -215,7 +225,10 @@ func (n *Native) VideoStop() error {
 	n.videoLock.Lock()
 	defer n.videoLock.Unlock()
 
-	videoStop()
+	n.startVideoWhenReady = false
+	if n.videoInitialized() || !n.retryVideoInit {
+		videoStop()
+	}
 	return nil
 }
 
@@ -224,6 +237,15 @@ func (n *Native) VideoStart() error {
 	n.videoLock.Lock()
 	defer n.videoLock.Unlock()
 
+	if n.retryVideoInit && !n.videoInitialized() {
+		n.startVideoWhenReady = true
+		return nil
+	}
+	n.startVideoLocked()
+	return nil
+}
+
+func (n *Native) startVideoLocked() {
 	// check if the chip is currently in sleep mode
 	wasSleeping, _ := n.getSleepMode()
 
@@ -238,7 +260,6 @@ func (n *Native) VideoStart() error {
 	}
 
 	videoStart()
-	return nil
 }
 
 // VideoGetStreamingStatus gets the streaming status of the video.

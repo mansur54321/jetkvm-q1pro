@@ -1,0 +1,56 @@
+#!/bin/sh
+# BusyBox init invokes this once before starting JetKVM.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+/sbin/q1-status-led boot || true
+uses_mdev=0
+if grep -qw devtmpfs /proc/filesystems; then
+    if ! grep -q ' /dev devtmpfs ' /proc/mounts; then mount -t devtmpfs devtmpfs /dev; fi
+else
+    if ! grep -q ' /dev tmpfs ' /proc/mounts; then mount -t tmpfs -o mode=0755,nosuid tmpfs /dev; fi
+    # mdev subscribes to uevents before scanning sysfs and forking.
+    /sbin/mdev -d
+    uses_mdev=1
+fi
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
+mount -t configfs configfs /sys/kernel/config || echo "USB configfs unavailable." >&2
+mount -t debugfs -o ro,nosuid,nodev,noexec,mode=0700 debugfs /sys/kernel/debug || echo "DWC3 register status unavailable." >&2
+[ "$(cat /sys/class/ubi/ubi0_1/name)" = rootfs_data ]
+mount -t ubifs ubi0:rootfs_data /mnt/data
+# Keep existing UBI user data separate from the JetKVM application directory.
+[ ! -L /mnt/data/jetkvm-q1pro ]
+mkdir -p /mnt/data/jetkvm-q1pro
+mount -o bind /mnt/data/jetkvm-q1pro /userdata
+mkdir -p /userdata/jetkvm
+# RV1106 boards without a running RTC can boot in 2021, before the TLS certificates are valid.
+IFS= read -r build_epoch </etc/jetkvm-build-epoch
+now=$(date -u +%s)
+if [ "$now" -lt "$build_epoch" ]; then date -u -s "@$build_epoch" >/dev/null; fi
+echo jetkvm-q1pro >/run/hostname
+echo '127.0.0.1 localhost jetkvm-q1pro' >/run/hosts
+: >/run/resolv.conf
+hostname jetkvm-q1pro
+ip link set lo up
+ip link set eth0 up || echo "Ethernet interface unavailable." >&2
+modules=/lib/modules/$(uname -r)
+while read -r name args; do
+    [ -n "$name" ] || continue
+    sysname=$(echo "$name" | tr - _)
+    if [ ! -d "/sys/module/$sysname" ]; then
+        # Options in modules.list are fixed at build time.
+        insmod "$modules/$name.ko" $args || echo "Module failed: $name" >&2
+    fi
+done </etc/jetkvm-modules
+if [ "$uses_mdev" = 1 ]; then /sbin/mdev -s; fi
+for flag in /sys/module/video_rkcif/parameters/clr_unready_dev /sys/module/video_rkisp/parameters/clr_unready_dev; do
+    if [ -e "$flag" ]; then echo 1 >"$flag"; fi
+done
+/usr/sbin/dropbear.sh || echo "JetKVM developer SSH failed to start." >&2
+: >/run/jetkvm-ready

@@ -1,0 +1,22 @@
+#!/bin/busybox sh
+b=/bin/busybox
+set -eu
+$b mount -t proc proc /proc
+$b mount -t sysfs sysfs /sys
+$b mount -t tmpfs tmpfs /dev
+$b mdev -d
+for name in /dev/vda /dev/vdb /dev/vdc /dev/mtd0 /dev/mtd1 /dev/ubi0 /dev/ubi0_0; do
+    [ -e "$name" ] || { $b echo "missing guest storage: $name"; $b cat /proc/mtd; exit 1; }
+done
+$b cat /proc/mtd
+[ "$($b cat /sys/class/mtd/mtd0/name)" = boot ]
+[ "$($b cat /sys/class/mtd/mtd1/name)" = rootfs ]
+[ "$($b cat /sys/class/ubi/ubi0/mtd_num)" = 1 ]
+$b mount -t squashfs -o ro /dev/vdb /factory
+$b mount -t tmpfs tmpfs /factory/tmp
+$b mkdir /factory/tmp/tests
+$b mount -t ext4 -o ro,noload /dev/vdc /factory/tmp/tests
+$b mount -o bind /proc /factory/proc
+$b mount -o bind /sys /factory/sys
+$b mount -o bind /dev /factory/dev
+exec /enter

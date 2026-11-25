@@ -5,7 +5,7 @@ import { GridCard } from "@components/Card";
 import { SettingsItem } from "@components/SettingsItem";
 import { SettingsPageHeader } from "@components/SettingsPageheader";
 import { JsonRpcResponse, useJsonRpc } from "@hooks/useJsonRpc";
-import { useRTCStore } from "@hooks/stores";
+import { useCapability, useRTCStore } from "@hooks/stores";
 import notifications from "@/notifications";
 import { m } from "@localizations/messages.js";
 import { LuInfo } from "react-icons/lu";
@@ -20,6 +20,7 @@ interface UsbDeviceConfig {
 
 export default function SettingsAudioRoute() {
   const { send } = useJsonRpc();
+  const displayPortAudio = useCapability("displayport_audio");
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [usbAudioEnabled, setUsbAudioEnabled] = useState<boolean | null>(null);
 
@@ -60,7 +61,7 @@ export default function SettingsAudioRoute() {
     [enabled, send],
   );
 
-  const audioBlockedByUsb = usbAudioEnabled === false;
+  const audioBlockedByUsb = !displayPortAudio && usbAudioEnabled === false;
 
   return (
     <div className="space-y-4">
@@ -69,11 +70,15 @@ export default function SettingsAudioRoute() {
         <SettingsItem
           title={m.audio_enable_title()}
           badge="Experimental"
-          description={m.audio_enable_description()}
+          description={displayPortAudio ? "DisplayPort (USB-C)" : m.audio_enable_description()}
         >
           <Checkbox
             checked={enabled ?? false}
-            disabled={enabled === null || usbAudioEnabled === null || audioBlockedByUsb}
+            disabled={
+              enabled === null ||
+              (!displayPortAudio && usbAudioEnabled === null) ||
+              audioBlockedByUsb
+            }
             aria-describedby={audioBlockedByUsb ? "audio-usb-disabled-hint" : undefined}
             onChange={e => handleChange(e.target.checked)}
           />

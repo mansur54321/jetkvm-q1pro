@@ -24,13 +24,16 @@ type ResolvConfChangeCallback func(family int, resolvConf *types.InterfaceResolv
 
 // InterfaceManager manages a single network interface
 type InterfaceManager struct {
-	ctx       context.Context
-	ifaceName string
-	config    *types.NetworkConfig
-	logger    *zerolog.Logger
-	state     *types.InterfaceState
-	linkState *link.Link
-	stateMu   sync.RWMutex
+	operations  sync.Mutex
+	configMu    sync.RWMutex
+	routeMetric int
+	ctx         context.Context
+	ifaceName   string
+	config      *types.NetworkConfig
+	logger      *zerolog.Logger
+	state       *types.InterfaceState
+	linkState   *link.Link
+	stateMu     sync.RWMutex
 
 	// Network components
 	staticConfig *StaticConfigManager
@@ -91,8 +94,9 @@ func NewInterfaceManager(ctx context.Context, ifaceName string, config *types.Ne
 
 	// Set up DHCP client callbacks
 	im.dhcpClient.SetOnLeaseChange(func(lease *types.DHCPLease) {
-		if im.config.IPv4Mode.String != "dhcp" {
-			im.logger.Warn().Str("mode", im.config.IPv4Mode.String).Msg("ignoring DHCP lease, current mode is not DHCP")
+		mode := im.GetConfig().IPv4Mode.String
+		if mode != "dhcp" {
+			im.logger.Warn().Str("mode", mode).Msg("ignoring DHCP lease, current mode is not DHCP")
 			return
 		}
 
@@ -110,14 +114,9 @@ func NewInterfaceManager(ctx context.Context, ifaceName string, config *types.Ne
 
 // Start starts managing the interface
 func (im *InterfaceManager) Start() error {
-	im.stateMu.Lock()
-	defer im.stateMu.Unlock()
-
+	im.operations.Lock()
+	defer im.operations.Unlock()
 	im.logger.Info().Msg("starting interface manager")
-
-	// Start monitoring interface state
-	im.wg.Add(1)
-	go im.monitorInterfaceState()
 
 	nl := getNetlinkManager()
 
@@ -153,6 +152,8 @@ func (im *InterfaceManager) Start() error {
 		}
 	}
 
+	im.wg.Add(1)
+	go im.monitorInterfaceState()
 	im.logger.Info().Msg("interface manager started")
 	return nil
 }
@@ -163,6 +164,8 @@ func (im *InterfaceManager) Stop() error {
 
 	close(im.stopCh)
 	im.wg.Wait()
+	im.operations.Lock()
+	defer im.operations.Unlock()
 
 	// Stop DHCP client
 	if im.dhcpClient != nil {
@@ -343,6 +346,8 @@ func (im *InterfaceManager) Domain() string {
 // GetConfig returns the current interface configuration
 func (im *InterfaceManager) GetConfig() *types.NetworkConfig {
 	// Return a copy to avoid race conditions
+	im.configMu.RLock()
+	defer im.configMu.RUnlock()
 	config := *im.config
 	return &config
 }
@@ -358,12 +363,18 @@ func (im *InterfaceManager) SetConfig(config *types.NetworkConfig) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
+	im.operations.Lock()
+	defer im.operations.Unlock()
+	im.configMu.Lock()
 	im.config = config
+	im.configMu.Unlock()
 
-	// Apply the new configuration
-	if err := im.applyConfiguration(); err != nil {
-		im.logger.Error().Err(err).Msg("failed to apply new configuration")
-		return err
+	// A wireless session can configure Ethernet before its driver or peer is ready.
+	if im.routeMetric == 0 || (im.linkState != nil && im.linkState.Attrs().OperState == netlink.OperUp) {
+		if err := im.applyConfiguration(); err != nil {
+			im.logger.Error().Err(err).Msg("failed to apply new configuration")
+			return err
+		}
 	}
 
 	// Notify callback
@@ -377,6 +388,8 @@ func (im *InterfaceManager) SetConfig(config *types.NetworkConfig) error {
 
 // RenewDHCPLease renews the DHCP lease
 func (im *InterfaceManager) RenewDHCPLease() error {
+	im.operations.Lock()
+	defer im.operations.Unlock()
 	if im.dhcpClient == nil {
 		return fmt.Errorf("DHCP client not available")
 	}
@@ -511,6 +524,9 @@ func (im *InterfaceManager) disableIPv4() error {
 		im.dhcpClient.SetIPv4(false)
 	}
 
+	if im.routeMetric != 0 {
+		return im.ReconcileLinkAddrs(nil, link.AfInet, link.StaticProtocol)
+	}
 	// Remove all IPv4 addresses
 	return im.staticConfig.DisableIPv4()
 }
@@ -623,15 +639,25 @@ func (im *InterfaceManager) disableIPv6() error {
 }
 
 func (im *InterfaceManager) handleLinkStateChange(link *link.Link) {
-	{
-		im.stateMu.Lock()
-		defer im.stateMu.Unlock()
-
-		if link.IsSame(im.linkState) {
-			return
+	im.operations.Lock()
+	defer im.operations.Unlock()
+	select {
+	case <-im.stopCh:
+		return
+	default:
+	}
+	if link.IsSame(im.linkState) {
+		return
+	}
+	first := im.linkState == nil || im.linkState.Attrs().Index != link.Attrs().Index
+	if first && im.routeMetric != 0 {
+		if err := getNetlinkManager().SetMultiInterfaceIPv4(im.ifaceName); err != nil {
+			im.logger.Warn().Err(err).Msg("failed to set multihomed IPv4 parameters")
 		}
-
-		im.linkState = link
+	}
+	im.linkState = link
+	if first && link.Attrs().OperState != netlink.OperUp {
+		return
 	}
 
 	im.logger.Info().Interface("link", link).Msg("link state changed")
@@ -722,14 +748,68 @@ func (im *InterfaceManager) handleLinkDown() {
 			im.logger.Error().Err(err).Msg("failed to stop DHCP client")
 		}
 	}
+	if im.routeMetric != 0 {
+		im.clearLeaseState()
+	}
 
 	netlinkMgr := getNetlinkManager()
+	if im.routeMetric != 0 {
+		if err := link.ReconcileSourceRoutes(0, im.routeMetric, nil); err != nil {
+			im.logger.Warn().Err(err).Msg("failed to clear source routes")
+		}
+	}
 	if err := netlinkMgr.RemoveAllAddresses(im.linkState, link.AfInet); err != nil {
 		im.logger.Error().Err(err).Msg("failed to remove all IPv4 addresses")
 	}
 
 	if err := netlinkMgr.RemoveNonLinkLocalIPv6Addresses(im.linkState); err != nil {
 		im.logger.Error().Err(err).Msg("failed to remove non-link-local IPv6 addresses")
+	}
+}
+
+// Watch for late drivers and carrier without blocking application startup.
+func (im *InterfaceManager) watchInterface() {
+	defer im.wg.Done()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		current, err := im.link()
+		if err == nil {
+			if current.Attrs().Flags&net.FlagUp == 0 {
+				if err := getNetlinkManager().LinkSetUp(current); err != nil {
+					im.logger.Warn().Err(err).Msg("failed to bring interface up")
+				}
+			}
+			im.handleLinkStateChange(current)
+			if err := im.updateInterfaceState(); err != nil {
+				im.logger.Debug().Err(err).Msg("failed to refresh interface state")
+			}
+		} else {
+			im.operations.Lock()
+			if im.linkState != nil {
+				im.linkState = nil
+				_ = im.dhcpClient.Stop()
+				im.clearLeaseState()
+				if err := link.ReconcileSourceRoutes(0, im.routeMetric, nil); err != nil {
+					im.logger.Warn().Err(err).Msg("failed to clear source routes")
+				}
+				im.stateMu.Lock()
+				reset := types.InterfaceState{InterfaceName: im.ifaceName}
+				im.state = &reset
+				im.stateMu.Unlock()
+				if im.onStateChange != nil {
+					im.onStateChange(reset)
+				}
+			}
+			im.operations.Unlock()
+		}
+		select {
+		case <-im.ctx.Done():
+			return
+		case <-im.stopCh:
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -756,6 +836,17 @@ func (im *InterfaceManager) monitorInterfaceState() {
 	}
 }
 
+func (im *InterfaceManager) clearLeaseState() {
+	im.stateMu.Lock()
+	im.state.DHCPLease4, im.state.DHCPLease6, im.state.NTPServers = nil, nil, nil
+	im.stateMu.Unlock()
+	for _, family := range []int{link.AfInet, link.AfInet6} {
+		if err := im.onResolvConfChange(family, &types.InterfaceResolvConf{}); err != nil {
+			im.logger.Warn().Err(err).Msg("failed to clear link DNS")
+		}
+	}
+}
+
 // updateStateFromDHCPLease updates the state from a DHCP lease
 func (im *InterfaceManager) updateStateFromDHCPLease(lease *types.DHCPLease) {
 	family := link.AfInet
@@ -766,6 +857,12 @@ func (im *InterfaceManager) updateStateFromDHCPLease(lease *types.DHCPLease) {
 		family = link.AfInet6
 	} else {
 		im.state.DHCPLease4 = lease
+	}
+	im.state.NTPServers = nil
+	for _, current := range []*types.DHCPLease{im.state.DHCPLease4, im.state.DHCPLease6} {
+		if current != nil {
+			im.state.NTPServers = append(im.state.NTPServers, current.NTPServers...)
+		}
 	}
 	im.stateMu.Unlock()
 
@@ -792,15 +889,17 @@ func (im *InterfaceManager) updateStateFromDHCPLease(lease *types.DHCPLease) {
 // ReconcileLinkAddrs reconciles the link addresses
 func (im *InterfaceManager) ReconcileLinkAddrs(addrs []types.IPAddress, family int, protocol netlink.RouteProtocol) error {
 	nl := getNetlinkManager()
-	link, err := im.link()
+	current, err := im.link()
 	if err != nil {
 		return fmt.Errorf("failed to get interface: %w", err)
 	}
-	if link == nil {
-		return fmt.Errorf("failed to get interface: %w", err)
+	if err := nl.ReconcileLinkWithMetric(current, addrs, family, protocol, im.routeMetric); err != nil {
+		return err
 	}
-
-	return nl.ReconcileLink(link, addrs, family, protocol)
+	if im.routeMetric != 0 && family == netlink.FAMILY_V4 {
+		return link.ReconcileSourceRoutes(current.Attrs().Index, im.routeMetric, addrs)
+	}
+	return nil
 }
 
 // applyDHCPLease applies DHCP lease configuration using ReconcileLinkAddrs
@@ -821,6 +920,9 @@ func (im *InterfaceManager) applyDHCPLease(lease *types.DHCPLease) error {
 
 	// Convert DHCP lease to IPv4Config
 	ipv4Config := im.convertDHCPLeaseToIPv4Config(lease)
+	if ipv4Config == nil {
+		return fmt.Errorf("invalid IPv4 lease address or subnet mask")
+	}
 
 	// Apply the configuration using ReconcileLinkAddrs
 	return im.ReconcileLinkAddrs([]types.IPAddress{*ipv4Config}, link.AfInet, link.DhcpProtocol)
@@ -828,6 +930,9 @@ func (im *InterfaceManager) applyDHCPLease(lease *types.DHCPLease) error {
 
 // convertDHCPLeaseToIPv4Config converts a DHCP lease to IPv4Config
 func (im *InterfaceManager) convertDHCPLeaseToIPv4Config(lease *types.DHCPLease) *types.IPAddress {
+	if lease.IPAddress.To4() == nil || lease.Netmask.To4() == nil {
+		return nil
+	}
 	ipNet := lease.IPNet()
 	if ipNet == nil {
 		return nil
@@ -836,11 +941,13 @@ func (im *InterfaceManager) convertDHCPLeaseToIPv4Config(lease *types.DHCPLease)
 	// Create IPv4Address
 	ipv4Addr := types.IPAddress{
 		Address:   *ipNet,
-		Gateway:   lease.Routers[0],
 		Secondary: false,
 		Permanent: false,
 	}
 
+	if len(lease.Routers) > 0 {
+		ipv4Addr.Gateway = lease.Routers[0]
+	}
 	im.logger.Trace().
 		Interface("ipv4Addr", ipv4Addr).
 		Interface("lease", lease).

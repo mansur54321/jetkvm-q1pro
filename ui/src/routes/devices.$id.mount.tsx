@@ -42,6 +42,7 @@ export default function MountRoute() {
 export function Dialog({ onClose }: Readonly<{ onClose: () => void }>) {
   useVideoStreamPause();
   const uploadChannel = useCapability("upload_channel");
+  const downloadOnly = useCapability("storage_download_only");
   const { modalView, setModalView, setRemoteVirtualMediaState, errorMessage, setErrorMessage } =
     useMountMediaStore();
   const [incompleteFileName, setIncompleteFileName] = useState<string | null>(null);
@@ -155,12 +156,13 @@ export function Dialog({ onClose }: Readonly<{ onClose: () => void }>) {
               {modalView === "mode" && (
                 <ModeSelectionView
                   onClose={() => onClose()}
+                  downloadOnly={downloadOnly}
                   selectedMode={selectedMode}
                   setSelectedMode={setSelectedMode}
                 />
               )}
 
-              {modalView === "url" && (
+              {modalView === "url" && !downloadOnly && (
                 <UrlView
                   mountInProgress={mountInProgress}
                   onBack={() => {
@@ -195,7 +197,7 @@ export function Dialog({ onClose }: Readonly<{ onClose: () => void }>) {
                 />
               )}
 
-              {modalView === "download" && (
+              {(modalView === "download" || (modalView === "url" && downloadOnly)) && (
                 <DownloadFileView onBack={() => setModalView("device")} />
               )}
 
@@ -233,11 +235,13 @@ export function Dialog({ onClose }: Readonly<{ onClose: () => void }>) {
 
 function ModeSelectionView({
   onClose,
+  downloadOnly,
   selectedMode,
   setSelectedMode,
 }: {
   onClose: () => void;
   selectedMode: "url" | "device";
+  downloadOnly: boolean;
   setSelectedMode: (mode: "url" | "device") => void;
 }) {
   const { setModalView } = useMountMediaStore();
@@ -255,11 +259,11 @@ function ModeSelectionView({
       <div className="grid gap-4 md:grid-cols-3">
         {[
           {
-            label: m.mount_url_mount(),
+            label: downloadOnly ? m.mount_download_title() : m.mount_url_mount(),
             value: "url",
-            description: m.mount_url_description(),
-            icon: LuLink,
-            tag: m.experimental(),
+            description: downloadOnly ? m.mount_download_description() : m.mount_url_description(),
+            icon: downloadOnly ? LuDownload : LuLink,
+            tag: downloadOnly ? null : m.experimental(),
             disabled: false,
           },
           {
@@ -332,7 +336,7 @@ function ModeSelectionView({
             size="MD"
             theme="primary"
             onClick={() => {
-              setModalView(selectedMode);
+              setModalView(selectedMode === "url" && downloadOnly ? "download" : selectedMode);
             }}
             text={m.continue()}
           />
@@ -1496,6 +1500,7 @@ function fileNameFromUrl(url: URL | null): string {
 function DownloadFileView({ onBack }: { onBack: () => void }) {
   const [url, setUrl] = useState("");
   const [editedFileName, setEditedFileName] = useState<string | null>(null);
+  const [bytesFree, setBytesFree] = useState<number | null>(null);
   const [download, setDownload] = useState<StorageDownloadState | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -1529,6 +1534,9 @@ function DownloadFileView({ onBack }: { onBack: () => void }) {
   const { send } = useJsonRpc(onEvent);
 
   useEffect(() => {
+    send("getStorageSpace", {}, (resp: JsonRpcResponse) => {
+      if (!("error" in resp)) setBytesFree((resp.result as { bytesFree: number }).bytesFree);
+    });
     send("getStorageDownloadState", {}, (resp: JsonRpcResponse) => {
       if ("error" in resp) return;
       const state = resp.result as StorageDownloadState;
@@ -1565,6 +1573,11 @@ function DownloadFileView({ onBack }: { onBack: () => void }) {
   return (
     <div className="w-full space-y-4">
       <ViewHeader title={m.mount_download_title()} description={m.mount_download_description()} />
+      {bytesFree !== null && (
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          {m.mount_bytes_free({ bytesFree: formatters.bytes(bytesFree) })}
+        </p>
+      )}
 
       {status === "downloading" && download && (
         <Card>

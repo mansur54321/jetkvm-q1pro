@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +20,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
-	"github.com/psanford/httpreadat"
 )
 
 // rebindAndRecoverHID performs a corrective USB rebind with recovery poller
@@ -185,12 +183,28 @@ func getMassStorageCDROMEnabled() (bool, error) {
 }
 
 type VirtualMediaUrlInfo struct {
-	Usable bool   `json:"usable"`
-	Reason string `json:"reason,omitempty"`
-	Size   int64  `json:"size"`
+	validator string
+	Usable    bool   `json:"usable"`
+	Reason    string `json:"reason,omitempty"`
+	Size      int64  `json:"size"`
+}
+
+func storageDownloadOnly() bool {
+	if !isQ1Pro() {
+		return false
+	}
+	node, err := os.Stat(nbdDevicePath)
+	if err != nil || node.Mode()&(os.ModeDevice|os.ModeCharDevice) != os.ModeDevice {
+		return true
+	}
+	_, err = os.Stat("/sys/class/block/nbd0/dev")
+	return err != nil
 }
 
 func rpcCheckMountUrl(rawURL string) (*VirtualMediaUrlInfo, error) {
+	if storageDownloadOnly() {
+		return &VirtualMediaUrlInfo{Reason: "Download the image to device storage before mounting it. This kernel has no network block device."}, nil
+	}
 	rawURL = strings.TrimSpace(rawURL)
 	if _, err := imagedownload.ParseURL(rawURL); errors.Is(err, imagedownload.ErrUnsupportedScheme) {
 		return &VirtualMediaUrlInfo{
@@ -209,6 +223,7 @@ func rpcCheckMountUrl(rawURL string) (*VirtualMediaUrlInfo, error) {
 		return nil, fmt.Errorf("failed to check url: %w", err)
 	}
 	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
@@ -240,47 +255,18 @@ func rpcCheckMountUrl(rawURL string) (*VirtualMediaUrlInfo, error) {
 		}, nil
 	}
 
-	contentRange := strings.TrimSpace(resp.Header.Get("Content-Range"))
-	if strings.HasSuffix(contentRange, "/*") {
-		return &VirtualMediaUrlInfo{
-			Usable: false,
-			Reason: "The URL is available, but the server did not report the image size.",
-		}, nil
-	}
-
-	rangeFields := strings.Fields(contentRange)
-	if len(rangeFields) != 2 || strings.ToLower(rangeFields[0]) != "bytes" {
-		return &VirtualMediaUrlInfo{
-			Usable: false,
-			Reason: "The URL is available, but the server returned an unreadable range response.",
-		}, nil
-	}
-
-	rangeParts := strings.Split(rangeFields[1], "/")
-	if len(rangeParts) != 2 || rangeParts[1] == "*" {
-		return &VirtualMediaUrlInfo{
-			Usable: false,
-			Reason: "The URL is available, but the server returned an unreadable range response.",
-		}, nil
-	}
-
-	size, err := strconv.ParseInt(rangeParts[1], 10, 64)
+	size, err := rangeSize(resp.Header.Get("Content-Range"), 0, 0)
 	if err != nil {
-		return &VirtualMediaUrlInfo{
-			Usable: false,
-			Reason: "The URL is available, but the server returned an unreadable range response.",
-		}, nil
+		return &VirtualMediaUrlInfo{Reason: "The URL returned an invalid range for the first byte of the image."}, nil
 	}
-	if size <= 0 {
-		return &VirtualMediaUrlInfo{
-			Usable: false,
-			Reason: "The URL points to an empty file.",
-		}, nil
+	validator := resp.Header.Get("ETag")
+	if validator == "" || strings.HasPrefix(validator, "W/") {
+		validator = resp.Header.Get("Last-Modified")
 	}
-
 	return &VirtualMediaUrlInfo{
-		Usable: true,
-		Size:   size,
+		Usable:    true,
+		validator: validator,
+		Size:      size,
 	}, nil
 }
 
@@ -343,8 +329,6 @@ func rpcUnmountImage() error {
 	}
 	return nil
 }
-
-var httpRangeReader *httpreadat.RangeReader
 
 func getInitialVirtualMediaState() (*VirtualMediaState, error) {
 	cdromEnabled, err := getMassStorageCDROMEnabled()
@@ -426,8 +410,17 @@ func prepareHTTPMount(url string, mode VirtualMediaMode) error {
 	if currentVirtualMediaState != nil {
 		return fmt.Errorf("another virtual media is already mounted")
 	}
-	httpRangeReader = httpreadat.New(url)
-	logger.Info().Str("url", url).Int64("size", urlInfo.Size).Msg("using remote url")
+	device := NewNBDDevice()
+	device.backend = remoteImageBackend{ReaderAt: remoteHTTPImage{url: url, size: urlInfo.Size, validator: urlInfo.validator}, size: urlInfo.Size}
+	if err := device.Start(); err != nil {
+		return fmt.Errorf("start remote media: %w", err)
+	}
+	// Until the LUN accepts the device this mount belongs to this call.
+	defer func() {
+		if nbdDevice != device {
+			device.Close()
+		}
+	}()
 
 	// f_mass_storage refuses cdrom and ro while the LUN holds an open medium,
 	// and a refused write aborts the whole gadget transaction. Eject first; on
@@ -440,6 +433,10 @@ func prepareHTTPMount(url string, mode VirtualMediaMode) error {
 		return fmt.Errorf("failed to set mass storage mode: %w", err)
 	}
 
+	if err := gadget.SetMassStorageImage(nbdDevicePath); err != nil {
+		return err
+	}
+	nbdDevice = device
 	currentVirtualMediaState = &VirtualMediaState{
 		Source: HTTP,
 		Mode:   mode,
@@ -454,20 +451,6 @@ func rpcMountWithHTTP(url string, mode VirtualMediaMode) error {
 		return err
 	}
 
-	logger.Debug().Msg("Starting nbd device")
-	nbdDevice = NewNBDDevice()
-	err := nbdDevice.Start()
-	if err != nil {
-		logger.Warn().Err(err).Msg("failed to start nbd device")
-		return err
-	}
-	logger.Debug().Msg("nbd device started")
-	//TODO: replace by polling on block device having right size
-	time.Sleep(1 * time.Second)
-	err = gadget.SetMassStorageImage("/dev/nbd0")
-	if err != nil {
-		return err
-	}
 	logger.Info().Msg("usb mass storage mounted")
 	if mqttManager != nil {
 		mqttManager.publishVirtualMediaState()
@@ -542,8 +525,8 @@ func rpcGetStorageSpace() (*StorageSpace, error) {
 	}
 
 	totalSpace := stat.Blocks * uint64(stat.Bsize)
-	freeSpace := stat.Bfree * uint64(stat.Bsize)
-	usedSpace := totalSpace - freeSpace
+	freeSpace := stat.Bavail * uint64(stat.Bsize)
+	usedSpace := totalSpace - stat.Bfree*uint64(stat.Bsize)
 
 	return &StorageSpace{
 		BytesUsed: int64(usedSpace),

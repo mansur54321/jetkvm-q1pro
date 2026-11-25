@@ -31,20 +31,11 @@ const allCodecOptions = [
   { value: "h264", label: m.video_codec_h264() },
 ];
 
-const h265Supported = (() => {
-  // Linux browsers frequently advertise H.265 they cannot actually decode,
-  // leaving users stuck on a black "Loading video stream..." screen. See
-  // jetkvm/kvm#1413.
-  if (isLinuxDesktop()) return false;
-  const caps = RTCRtpReceiver.getCapabilities?.("video");
-  return caps?.codecs.some(c => c.mimeType === "video/H265") ?? false;
-})();
-
-const browserCodecOptions = h265Supported
-  ? allCodecOptions
-  : allCodecOptions.filter(o => o.value !== "h265");
+const receiverSupportsHEVC = globalThis.RTCRtpReceiver?.getCapabilities?.("video")
+  ?.codecs.some(codec => codec.mimeType.toLowerCase() === "video/h265") ?? false;
 
 export default function SettingsVideoRoute() {
+  const fixedEdid = useCapability("fixed_edid");
   const customEdid = useCapability("custom_edid");
   const { send } = useJsonRpc();
   const [streamQuality, setStreamQuality] = useState("1");
@@ -53,19 +44,22 @@ export default function SettingsVideoRoute() {
   const [supportedCodecs, setSupportedCodecs] = useState<string[] | null>(null);
   const [codecLoadFailed, setCodecLoadFailed] = useState(false);
   const [codecLoadAttempt, setCodecLoadAttempt] = useState(0);
+  const manualHEVC = useCapability("manual_hevc");
+  const linux = isLinuxDesktop();
+  const allowHEVC = receiverSupportsHEVC && (!linux || manualHEVC);
   const codecOptions = allCodecOptions
-    .filter(
-      option =>
-        option.value === codecPreference ||
-        (browserCodecOptions.includes(option) &&
-          (option.value === "auto" || supportedCodecs?.includes(option.value))),
-    )
     .map(option => ({
       ...option,
-      disabled:
-        option.value !== "auto" &&
-        (!browserCodecOptions.includes(option) || !supportedCodecs?.includes(option.value)),
-    }));
+      disabled: option.value !== "auto" &&
+        (!supportedCodecs?.includes(option.value) || (option.value === "h265" && !allowHEVC)),
+    }))
+    .filter(option => !option.disabled || option.value === codecPreference ||
+      (manualHEVC && supportedCodecs?.includes(option.value)));
+  let codecDescription = m.video_codec_description();
+  if (manualHEVC && supportedCodecs?.includes("h265")) {
+    if (!receiverSupportsHEVC) codecDescription = m.q1_codec_no_hevc();
+    else if (linux) codecDescription = m.q1_codec_linux_manual();
+  }
 
   const [disableHostDisplayWhenIdle, setDisableHostDisplayWhenIdle] = useState(false);
   const [disableHostDisplayWhenIdleLoading, setDisableHostDisplayWhenIdleLoading] = useState(true);
@@ -135,6 +129,7 @@ export default function SettingsVideoRoute() {
   }, [send]);
 
   useEffect(() => {
+    if (fixedEdid) return;
     let active = true;
     setEdidLoading(true);
     // Classify the current value only after the device's preset list arrives.
@@ -149,6 +144,10 @@ export default function SettingsVideoRoute() {
       }
       const presets = resp.result as EDIDPreset[];
       setEdidPresets(presets);
+      if (presets.length === 0 && !customEdid) {
+        setEdidLoading(false);
+        return;
+      }
       void send("getEDID", {}, (resp: JsonRpcResponse) => {
         if (!active) return;
         setEdidLoading(false);
@@ -167,7 +166,7 @@ export default function SettingsVideoRoute() {
     return () => {
       active = false;
     };
-  }, [send]);
+  }, [send, fixedEdid, customEdid]);
 
   const handleStreamQualityChange = (factor: string) => {
     setStreamQualityLoading(true);
@@ -291,7 +290,7 @@ export default function SettingsVideoRoute() {
 
             <SettingsItem
               title={m.video_codec_title()}
-              description={m.video_codec_description()}
+              description={codecDescription}
               loading={supportedCodecs === null && !codecLoadFailed}
             >
               <SelectMenuBasic
@@ -299,6 +298,7 @@ export default function SettingsVideoRoute() {
                 label=""
                 value={codecPreference}
                 options={codecOptions}
+                className="min-w-32"
                 disabled={supportedCodecs === null}
                 onChange={e => handleCodecChange(e.target.value)}
               />
@@ -313,17 +313,19 @@ export default function SettingsVideoRoute() {
               )}
             </SettingsItem>
 
-            <SettingsItem
-              title={m.video_idle_display_title()}
-              description={m.video_idle_display_description()}
-              loading={disableHostDisplayWhenIdleLoading}
-            >
-              <Checkbox
-                checked={disableHostDisplayWhenIdle}
-                disabled={disableHostDisplayWhenIdleLoading}
-                onChange={e => handleDisableHostDisplayWhenIdleChange(e.target.checked)}
-              />
-            </SettingsItem>
+            {!fixedEdid && (
+              <SettingsItem
+                title={m.video_idle_display_title()}
+                description={m.video_idle_display_description()}
+                loading={disableHostDisplayWhenIdleLoading}
+              >
+                <Checkbox
+                  checked={disableHostDisplayWhenIdle}
+                  disabled={disableHostDisplayWhenIdleLoading}
+                  onChange={e => handleDisableHostDisplayWhenIdleChange(e.target.checked)}
+                />
+              </SettingsItem>
+            )}
 
             <SettingsItem
               title={m.video_scaling_title()}
@@ -407,66 +409,68 @@ export default function SettingsVideoRoute() {
               </div>
             </NestedSettingsGroup>
 
-            <Fieldset disabled={edidLoading} className="space-y-2">
-              <SettingsItem
-                title={m.video_edid_title()}
-                description={m.video_edid_description()}
-                loading={edidLoading}
-              >
-                <SelectMenuBasic
-                  size="SM"
-                  label=""
-                  fullWidth
-                  disabled={edidLoading || edid === null}
-                  value={edid || ""}
-                  onChange={e => {
-                    if (e.target.value === "custom") {
-                      setEdid("custom");
-                      setCustomEdidValue("");
-                    } else {
-                      handleEDIDChange(e.target.value);
-                    }
-                  }}
-                  options={[
-                    ...edidPresets.map(p => ({ value: p.edid, label: p.name })),
-                    ...(customEdid ? [{ value: "custom", label: m.video_edid_custom() }] : []),
-                  ]}
-                />
-              </SettingsItem>
-              {customEdid && customEdidValue !== null && (
-                <>
-                  <SettingsItem
-                    title={m.video_custom_edid_title()}
-                    description={m.video_custom_edid_description()}
+            {!fixedEdid && (
+              <Fieldset disabled={edidLoading} className="space-y-2">
+                <SettingsItem
+                  title={m.video_edid_title()}
+                  description={m.video_edid_description()}
+                  loading={edidLoading}
+                >
+                  <SelectMenuBasic
+                    size="SM"
+                    label=""
+                    fullWidth
+                    disabled={edidLoading || edid === null}
+                    value={edid || ""}
+                    onChange={e => {
+                      if (e.target.value === "custom") {
+                        setEdid("custom");
+                        setCustomEdidValue("");
+                      } else {
+                        handleEDIDChange(e.target.value);
+                      }
+                    }}
+                    options={[
+                      ...edidPresets.map(p => ({ value: p.edid, label: p.name })),
+                      ...(customEdid ? [{ value: "custom", label: m.video_edid_custom() }] : []),
+                    ]}
                   />
-                  <TextAreaWithLabel
-                    label={m.video_edid_file_label()}
-                    placeholder="00F..."
-                    rows={3}
-                    value={customEdidValue}
-                    disabled={edidLoading}
-                    onChange={e => setCustomEdidValue(e.target.value)}
-                  />
-                  <div className="flex justify-start gap-x-2">
-                    <Button
-                      size="SM"
-                      theme="primary"
-                      text={m.video_set_custom_edid()}
-                      loading={edidLoading}
-                      onClick={() => handleEDIDChange(customEdidValue)}
+                </SettingsItem>
+                {customEdid && customEdidValue !== null && (
+                  <>
+                    <SettingsItem
+                      title={m.video_custom_edid_title()}
+                      description={m.video_custom_edid_description()}
                     />
-                    <Button
-                      size="SM"
-                      theme="light"
-                      text={m.video_restore_to_default()}
-                      loading={edidLoading}
-                      disabled={!edidPresets.length}
-                      onClick={() => handleEDIDChange(edidPresets[0].edid)}
+                    <TextAreaWithLabel
+                      label={m.video_edid_file_label()}
+                      placeholder="00F..."
+                      rows={3}
+                      value={customEdidValue}
+                      disabled={edidLoading}
+                      onChange={e => setCustomEdidValue(e.target.value)}
                     />
-                  </div>
-                </>
-              )}
-            </Fieldset>
+                    <div className="flex justify-start gap-x-2">
+                      <Button
+                        size="SM"
+                        theme="primary"
+                        text={m.video_set_custom_edid()}
+                        loading={edidLoading}
+                        onClick={() => handleEDIDChange(customEdidValue)}
+                      />
+                      <Button
+                        size="SM"
+                        theme="light"
+                        text={m.video_restore_to_default()}
+                        loading={edidLoading}
+                        disabled={!edidPresets.length}
+                        onClick={() => handleEDIDChange(edidPresets[0].edid)}
+                      />
+                    </div>
+                  </>
+                )}
+              </Fieldset>
+            )}
           </div>
 
           {debugMode && (

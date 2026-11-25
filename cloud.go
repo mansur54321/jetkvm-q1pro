@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jetkvm/kvm/internal/q1tailscale"
+	"github.com/jetkvm/kvm/internal/q1vpn"
 	"net/http"
 	"net/url"
 	"time"
@@ -394,7 +396,7 @@ func runWebsocketClient() error {
 	wsResetMetrics(true, "cloud", wsURL.Host)
 
 	// we don't have a source for the cloud connection
-	return handleWebRTCSignalWsMessages(c, true, wsURL.Host, connectionId, "", "", scopedLogger)
+	return handleWebRTCSignalWsMessages(context.Background(), c, true, wsURL.Host, connectionId, "", "", scopedLogger)
 }
 
 func authenticateSession(ctx context.Context, c *websocket.Conn, req WebRTCSessionRequest) error {
@@ -457,12 +459,14 @@ func handleSessionRequest(
 	}
 
 	session, err := newSession(SessionConfig{
-		ws:         c,
-		IsCloud:    isCloudConnection,
-		LocalIP:    req.IP,
-		ICEServers: req.ICEServers,
-		Logger:     scopedLogger,
-		MDNSMode:   config.NetworkConfig.MDNSMode.String,
+		ws:                   c,
+		IsCloud:              isCloudConnection,
+		LocalIP:              req.IP,
+		TunnelMux:            q1vpn.MediaMux(ctx),
+		UserspaceTailscaleIP: q1tailscale.MediaIPv4(ctx),
+		ICEServers:           req.ICEServers,
+		Logger:               scopedLogger,
+		MDNSMode:             config.NetworkConfig.MDNSMode.String,
 	})
 	if err != nil {
 		_ = wsjson.Write(context.Background(), c, gin.H{"error": err})

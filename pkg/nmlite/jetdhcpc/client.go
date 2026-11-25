@@ -91,7 +91,9 @@ type Client struct {
 	cfg    Config
 	l      *zerolog.Logger
 
-	ctx context.Context
+	ctx     context.Context
+	cancel  context.CancelFunc
+	workers sync.WaitGroup
 
 	// TODO: support multiple interfaces
 	currentLease4 *Lease
@@ -133,7 +135,9 @@ func NewClient(ctx context.Context, ifaces []string, c *Config, l *zerolog.Logge
 		cfg.Retries = 4
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
 	return &Client{
+		cancel:   cancel,
 		ctx:      ctx,
 		ifaces:   ifaces,
 		cfg:      cfg,
@@ -176,7 +180,16 @@ func getRenewalTime(lease *Lease) time.Duration {
 func (c *Client) requestLoop(t *time.Timer, family int, ifname string) {
 	l := c.l.With().Str("interface", ifname).Int("family", family).Logger()
 	attempt := 0
-	for range t.C {
+	defer c.workers.Done()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-t.C:
+		}
+		if !c.familyEnabled(family) {
+			continue
+		}
 		l.Info().Int("attempt", attempt).Msg("requesting lease")
 
 		if _, err := c.ensureInterfaceUp(ifname); err != nil {
@@ -205,6 +218,9 @@ func (c *Client) requestLoop(t *time.Timer, family int, ifname string) {
 
 		// Successfully obtained lease, reset attempt counter
 		attempt = 0
+		if c.ctx.Err() != nil || !c.familyEnabled(family) {
+			continue
+		}
 		c.handleLeaseChange(lease)
 
 		nextRenewal := getRenewalTime(lease)
@@ -359,14 +375,28 @@ func (c *Client) Start() error {
 	}
 
 	for _, iface := range c.ifaces {
-		if c.cfg.IPv4 {
-			go c.requestLoop(c.timer4, link.AfInet, iface)
-		}
-		if c.cfg.IPv6 {
-			go c.requestLoop(c.timer6, link.AfInet6, iface)
-		}
+		c.workers.Add(2)
+		go c.requestLoop(c.timer4, link.AfInet, iface)
+		go c.requestLoop(c.timer6, link.AfInet6, iface)
 	}
 
+	return nil
+}
+
+func (c *Client) familyEnabled(family int) bool {
+	c.cfgMu.Lock()
+	defer c.cfgMu.Unlock()
+	if family == link.AfInet {
+		return c.cfg.IPv4
+	}
+	return c.cfg.IPv6
+}
+
+func (c *Client) Stop() error {
+	c.cancel()
+	c.workers.Wait()
+	c.timer4.Stop()
+	c.timer6.Stop()
 	return nil
 }
 
@@ -378,18 +408,19 @@ func (c *Client) apply() {
 		domain      string
 	)
 
-	if c.currentLease4 != nil {
-		iface = c.currentLease4.InterfaceName
-		nameservers = c.currentLease4.DNS
-		searchList = c.currentLease4.SearchList
-		domain = c.currentLease4.Domain
+	lease4, lease6 := c.Lease4(), c.Lease6()
+	if lease4 != nil {
+		iface = lease4.InterfaceName
+		nameservers = lease4.DNS
+		searchList = lease4.SearchList
+		domain = lease4.Domain
 	}
 
-	if c.currentLease6 != nil {
-		iface = c.currentLease6.InterfaceName
-		nameservers = append(nameservers, c.currentLease6.DNS...)
-		searchList = append(searchList, c.currentLease6.SearchList...)
-		domain = c.currentLease6.Domain
+	if lease6 != nil {
+		iface = lease6.InterfaceName
+		nameservers = append(nameservers, lease6.DNS...)
+		searchList = append(searchList, lease6.SearchList...)
+		domain = lease6.Domain
 	}
 
 	// deduplicate searchList

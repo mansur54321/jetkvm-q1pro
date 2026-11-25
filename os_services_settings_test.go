@@ -1,6 +1,9 @@
 package kvm
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestMergeOSServicesConfigSwitch(t *testing.T) {
 	base := *defaultOSServicesConfig()
@@ -34,5 +37,16 @@ func TestMergeOSServicesConfigKeepsLastSender(t *testing.T) {
 	}
 	if merged.LastSenderVersion != base.LastSenderVersion || merged.LastSenderAt != base.LastSenderAt {
 		t.Fatalf("a settings request changed the last sender: %+v", merged)
+	}
+}
+
+func TestQ1OSServicesProbeCleansUpWithoutFunctionFS(t *testing.T) {
+	root := t.TempDir()
+	if err := q1FunctionFSAvailable(root); err == nil {
+		t.Fatal("advertised FunctionFS without a configfs function driver")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("unbound probe was not removed: %v, %v", entries, err)
 	}
 }
