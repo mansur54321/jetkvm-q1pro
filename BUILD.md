@@ -34,12 +34,18 @@ The output should be a Linux ARM32 executable. Give it to the installer as `--ap
 
 ## Test the source
 
-After building the web client, run the Go and browser-independent checks:
+After building the web client, run the Go tests:
 
 ```sh
 go test ./...
 go test -race ./internal/q1vpn ./internal/q1wifi ./tools/q1pro-ble ./tools/q1pro-maintenance
-node ui/tests/signaling-lifecycle.mjs
+```
+
+The browser fixture serves uncompressed web assets. Rebuild them and run the local Chromium test:
+
+```sh
+npm --prefix ui run build:device
+(cd ui && npx playwright install chromium && node tests/signaling-lifecycle.mjs)
 ```
 
 Run the native video lifecycle test if the compiled app or video driver integration changes:
