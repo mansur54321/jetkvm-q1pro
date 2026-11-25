@@ -64,7 +64,7 @@ func (d *NBDDevice) runKernelClient() error {
 	if err := control(ioctl.NEGOTIATION_IOCTL_SET_SOCK, d.kernelSocket.Fd()); err != nil {
 		return err
 	}
-	defer control(nbdClearSock, 0)
+	defer func() { _ = control(nbdClearSock, 0) }()
 	for _, setting := range []struct{ cmd, value uintptr }{
 		{ioctl.NEGOTIATION_IOCTL_SET_BLOCKSIZE, 512},
 		{ioctl.NEGOTIATION_IOCTL_SET_SIZE_BLOCKS, uintptr(sectors)},

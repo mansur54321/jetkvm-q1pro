@@ -155,5 +155,4 @@ func TestIsolatedDualInterface(t *testing.T) {
 	if err != nil || len(reply) != 1 || reply[0].LinkIndex != wifiLink.Attrs().Index {
 		t.Fatalf("same-LAN Wi-Fi reply: %v %v", reply, err)
 	}
-
 }

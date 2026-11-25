@@ -166,7 +166,7 @@ func main() {
 		if os.Getpid() == 1 {
 			fmt.Fprintln(os.Stderr, "Q1 maintenance stopped in RAM; no automatic retry")
 			for {
-				unix.Pause()
+				_ = unix.Pause() // Keep PID 1 in RAM after an interrupted wait.
 			}
 		}
 		os.Exit(1)

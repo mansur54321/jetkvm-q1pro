@@ -41,7 +41,7 @@ func privateDir(path string) error {
 		return err
 	}
 	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
-		return fmt.Errorf("Tailscale directory must be private: %s", path)
+		return fmt.Errorf("expected a private Tailscale directory: %s", path)
 	}
 	return nil
 }
@@ -80,7 +80,7 @@ func (s *Service) Install(source io.Reader) error {
 		return err
 	}
 	if _, err := os.Lstat(s.binary()); err == nil {
-		return errors.New("Tailscale daemon already exists")
+		return errors.New("a Tailscale daemon already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -89,7 +89,7 @@ func (s *Service) Install(source io.Reader) error {
 		return err
 	}
 	if free < DaemonBytes {
-		return fmt.Errorf("Tailscale requires %d available bytes; device has %d", DaemonBytes, free)
+		return fmt.Errorf("installing Tailscale requires %d available bytes; device has %d", DaemonBytes, free)
 	}
 	tmp, err := os.CreateTemp(s.dir, ".install-*")
 	if err != nil {

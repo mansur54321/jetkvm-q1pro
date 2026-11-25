@@ -9,10 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pojntfx/go-nbd/pkg/protocol"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/pojntfx/go-nbd/pkg/protocol"
 )
 
 func TestRemoteISOReadAtChecksRangeAfterMount(t *testing.T) {

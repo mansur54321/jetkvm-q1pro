@@ -65,13 +65,15 @@ func acquireHandoffWatchdog(identity string) (*handoffWatchdog, error) {
 	}
 	timeout, err := unix.IoctlGetInt(fd, unix.WDIOC_GETTIMEOUT)
 	if err != nil || timeout <= 0 {
-		f.Write([]byte("V"))
+		// Try magic close without hiding the acquisition error.
+		_, _ = f.Write([]byte("V"))
 		f.Close()
 		return nil, fmt.Errorf("read watchdog timeout: %d (%v)", timeout, err)
 	}
 	w := &handoffWatchdog{file: f, stop: make(chan struct{}), closed: make(chan struct{})}
 	if err := w.kick(); err != nil {
-		f.Write([]byte("V"))
+		// Preserve the first keepalive error if magic close also fails.
+		_, _ = f.Write([]byte("V"))
 		f.Close()
 		return nil, err
 	}

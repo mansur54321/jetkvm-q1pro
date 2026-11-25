@@ -68,12 +68,12 @@ func run() error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	fmt.Println("Q1 DUMMY HCD PASS")
+	fmt.Fprintln(os.Stdout, "Q1 DUMMY HCD PASS")
 	return nil
 }
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "Q1 DUMMY HCD FAIL:", err)
 	}
-	unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
+	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF) // The launcher times out if the guest cannot power off.
 }

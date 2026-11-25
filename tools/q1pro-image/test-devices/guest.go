@@ -76,7 +76,7 @@ func checkNode(pattern string, mode uint32) string {
 		}
 		return false
 	})
-	fmt.Printf("%s -> %s %d:%d %04o\n", path, node, unix.Major(stat.Rdev), unix.Minor(stat.Rdev), mode)
+	fmt.Fprintf(os.Stdout, "%s -> %s %d:%d %04o\n", path, node, unix.Major(stat.Rdev), unix.Minor(stat.Rdev), mode)
 	return node
 }
 
@@ -85,7 +85,7 @@ func remove(node string) {
 		_, err := os.Lstat(node)
 		return errors.Is(err, os.ErrNotExist)
 	})
-	fmt.Printf("removed %s\n", node)
+	fmt.Fprintf(os.Stdout, "removed %s\n", node)
 }
 
 func insmod(name string) {
@@ -98,7 +98,7 @@ func main() {
 	pid1, err := os.Readlink("/proc/1/exe")
 	must(err)
 	require(pid1 == "/bin/busybox", "expected packaged BusyBox as PID 1")
-	fmt.Println("PID 1:", pid1)
+	fmt.Fprintln(os.Stdout, "PID 1:", pid1)
 	require(read("/sys/firmware/devicetree/base/model") == "linux,dummy-virt\x00", "expected QEMU virt")
 	require(!strings.Contains(read("/proc/filesystems"), "devtmpfs"), "expected CONFIG_DEVTMPFS=n")
 	require(read("/proc/sys/kernel/hotplug") == "", "unexpected kernel uevent helper")
@@ -164,9 +164,9 @@ func main() {
 		write("UDC", []byte("\n"))
 		remove(hid)
 		remove(input)
-		fmt.Printf("dummy HCD bind/unbind %d passed\n", cycle)
+		fmt.Fprintf(os.Stdout, "dummy HCD bind/unbind %d passed\n", cycle)
 	}
-	fmt.Println("Q1 mdev QEMU PASS")
+	fmt.Fprintln(os.Stdout, "Q1 mdev QEMU PASS")
 	for {
 		time.Sleep(time.Hour)
 	}

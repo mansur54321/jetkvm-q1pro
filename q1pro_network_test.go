@@ -1,8 +1,9 @@
 package kvm
 
 import (
-	"github.com/guregu/null/v6"
 	"testing"
+
+	"github.com/guregu/null/v6"
 )
 
 func TestQ1ProRequiresBuiltInDHCP(t *testing.T) {
