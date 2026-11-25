@@ -23,6 +23,9 @@ find static -type f \( -name '*.js' -o -name '*.css' -o -name '*.svg' \) -exec g
 The upstream SDK's CMake toolchain uses `/opt/jetkvm-native-buildkit`. Bubblewrap supplies that directory for the build process. Run it on a Linux host with unprivileged user namespaces enabled.
 
 ```sh
+python3 -m venv q1-build-inputs/python
+q1-build-inputs/python/bin/pip install kconfiglib==14.1.0
+. q1-build-inputs/python/bin/activate
 bwrap --dev-bind / / --tmpfs /opt \
   --ro-bind "$PWD/q1-build-inputs/sdk" /opt/jetkvm-native-buildkit \
   --chdir "$PWD" \
