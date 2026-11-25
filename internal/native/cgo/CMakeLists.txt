@@ -41,7 +41,7 @@ FetchContent_MakeAvailable(lvgl)
 
 # Get source files, excluding CMake generated files
 file(GLOB_RECURSE sources CONFIGURE_DEPENDS "*.c" "ui/*.c")
-list(FILTER sources EXCLUDE REGEX "CMakeFiles.*CompilerId.*\\.c$")
+list(FILTER sources EXCLUDE REGEX "^${CMAKE_CURRENT_BINARY_DIR}/")
 # Exclude main.c from library sources (it's used for the binary target)
 list(FILTER sources EXCLUDE REGEX "main\\.c$")
 
